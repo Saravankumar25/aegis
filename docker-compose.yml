@@ -8,7 +8,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
       POSTGRES_DB: ${POSTGRES_DB:-aegis}
     ports:
-      - "5432:5432"
+      # Host 5433 (not 5432) to avoid clashing with a native Postgres install on the host.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

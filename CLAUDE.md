@@ -160,3 +160,9 @@ Each entry must include:
 - Deliberate deviation (documented in ESD §21 and BUILD_LOG): `CLAUDE.md` stays at repo root, not `docs/`, because the agent tooling loads it there.
 - Convention introduced: **`docs/BUILD_LOG.md`** is the detailed parallel build journal; this Feature Log keeps brief pointers into it.
 - Constraint surfaced: host Python is 3.14 but LangGraph/pydantic-core wheels may lag — backend venv targets Python 3.12. `kind`/`kubectl`/`helm`/`gh` not yet installed (needed M2/M8).
+
+### 2026-07-21 — Entry 2: Data layer — Postgres + pgvector (Milestone 1)
+- Implemented the MVP persistence layer (ESD §6): `core/{config,logging,db}`, `db/enums.py` (StrEnums), `db/state_machine.py` (ESD §6.1 transition allow-list), all MVP ORM models, the repository layer (`db/repository.py`) with idempotent `upsert_incident` (FR-10.1) and validated `record_transition`, and the hand-written Alembic `0001_initial` migration.
+- Architectural decision: **native Postgres enums** rather than String+CHECK for `incidents.state` (ESD §6.1) — equivalent guarantee, stronger + idiomatic; all states incl. V1.5 defined now to avoid an enum migration later. `audit_log` created as a monthly range-partitioned table with 13 pre-created partitions (ESD §17); rolling maintenance is a documented ops task. ESD unchanged (schema already specified these).
+- Environment: installed Python 3.12.10; `backend/.venv` created on it; all deps install cleanly (resolves the 3.14 wheel risk).
+- Tests: 27 unit tests pass (state machine + enum pinning); ruff lint+format clean; `alembic upgrade head` applies the full schema (tables, 13 partitions, HNSW index) against live Postgres+pgvector.
