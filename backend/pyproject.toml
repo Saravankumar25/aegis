@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-backend"
+version = "0.1.0"
+description = "Aegis — multi-agent incident response system (MVP: investigation, read-only)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pgvector>=0.2.5",
+    "structlog>=24.1",
+    "redis>=5.0",
+    "httpx>=0.27",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "langgraph>=0.2",
+    "langchain-core>=0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "anyio>=4.3",
+]
+
+[tool.setuptools]
+packages = [
+    "agents",
+    "api",
+    "core",
+    "db",
+    "mcp_servers",
+    "orchestrator",
+    "providers",
+    "rag",
+    "redaction",
+    "worker",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle, isort, bugbear, comprehensions, pyupgrade
+select = ["E", "F", "I", "B", "C4", "UP"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
