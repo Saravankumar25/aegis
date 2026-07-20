@@ -7,6 +7,31 @@ each piece. Source-of-truth hierarchy: PRD.md → ESD.md → CLAUDE.md → this 
 
 ---
 
+## Current status / resume here (as of 2026-07-21, end of session)
+
+**Done & committed:** M0 (rename + scaffold), M1 (data layer), M2 (kind cluster + Meridian +
+Prometheus). Three commits on `main`; nothing pushed yet (push is M8, to repo `aegis`).
+
+**Next up: Milestone 3 — read-only MCP servers** (`mcp_servers/{k8s,prometheus,github}`) with
+`verb_noun` tools, graceful degradation (retry→mark-unavailable), contract tests against fixtures,
+and fault-injection tests. Not started.
+
+**Environment state to reconnect tomorrow:**
+- Tool binaries: `KIND=~/bin/kind.exe`, `HELM=~/bin/helm.exe`,
+  `KUBECTL="/c/Program Files/Docker/Docker/resources/bin/kubectl.exe"`. Backend venv is Python 3.12
+  at `backend/.venv`.
+- **Postgres/Redis:** `docker compose up -d` (Postgres on host **5433**, migration already applied to
+  the volume — re-run `alembic upgrade head` is a no-op).
+- **kind cluster `aegis`:** may still be running from today. Re-check with
+  `kubectl --context kind-aegis get pods -A`; if gone, `bash infra/setup-cluster.sh` rebuilds it
+  (~10 min). Prometheus at http://localhost:9090 once up.
+- Quick sanity: `cd backend && ./.venv/Scripts/python.exe -m pytest tests/unit -q && ./.venv/Scripts/python.exe -m ruff check .` → 27 passing, clean.
+
+**Open threads:** none blocking. M5 will add the DB-backed idempotency test for `upsert_incident`;
+GitHub push (M8) will need a PAT or `gh` (not installed).
+
+---
+
 ## Milestone 0 — Rename to Aegis + repo scaffold
 
 **Status:** complete.
