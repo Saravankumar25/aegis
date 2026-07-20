@@ -107,3 +107,65 @@ cd backend && ./.venv/Scripts/python.exe -m alembic upgrade head
   publishes Postgres on host **5433** (`5433:5432`) and `.env` uses `127.0.0.1:5433`. Documented in
   `docker-compose.yml`. Verified: `alembic upgrade head` created all 8 base tables + 13 `audit_log`
   monthly partitions + the runbooks HNSW cosine index + the FR-10 unique constraint.
+
+---
+
+## Milestone 2 — kind cluster + Meridian Commerce + Prometheus
+
+**Status:** complete.
+
+### What changed
+- **Tooling:** installed `kind` v0.32.0 and `helm` v4.2.3 into `~/bin`; reused Docker Desktop's
+  `kubectl` v1.34.1. Scripts take these via `KIND`/`HELM`/`KUBECTL` env vars (no PATH assumptions).
+- **Cluster** (`infra/kind/cluster.yaml`): single-node `aegis` cluster; host `:9090`→Prometheus
+  NodePort 30090 and host `:9093`→Alertmanager NodePort 30093, so the host-run Prometheus MCP server
+  (M3) and the Alertmanager alert source reach the cluster directly.
+- **Meridian Commerce** (`infra/meridian/`): one FastAPI image parameterised by `SERVICE_NAME`,
+  backing `checkout-service` / `payment-service` / `catalog-service`. A background loop simulates
+  traffic and applies the active failure mode, exposing `http_requests_total`,
+  `http_request_duration_seconds`, `app_up`, `app_injected_error_rate`, plus `POST /admin/failure`
+  to inject error-rate / latency faults (ESD §18).
+- **kube-prometheus-stack** (`infra/kube-prometheus-stack/values.yaml`): installed via Helm; Grafana
+  disabled, short retention, modest resource limits for a laptop; `serviceMonitorSelectorNilUses
+  HelmValues: false` so the Meridian ServiceMonitor is scraped. Prometheus + Alertmanager on the
+  fixed NodePorts above.
+- **Manifests** (`infra/manifests/`): `meridian` namespace, the three Deployments+Services+one
+  ServiceMonitor, and the **read-only** k8s MCP RBAC — ServiceAccount `aegis-k8s-mcp` bound to a Role
+  granting only `get/list/watch` on pods, pod logs, events, services, deployments, replicasets in
+  `meridian`. **No write verbs** (ESD §16, PRD NFR-Security); V1.5 adds writes separately.
+- **Automation:** `infra/setup-cluster.sh` (idempotent bring-up) + `infra/inject-failure.sh`
+  (error / latency / clear / killpod) + `infra/README.md`.
+
+### Architecture review (per CLAUDE.md §2 — new external dependency: k8s + Prometheus)
+- **Reliability:** setup script is idempotent (`upgrade --install`, cluster-exists check). MCP servers
+  degrade gracefully when a source is down — enforced/tested in M3.
+- **Safety:** MVP RBAC is strictly read-only; the SA cannot delete or patch anything. Verified below.
+- **Security:** the SA credential is scoped to one namespace; no cluster-admin; no secrets access.
+- **Scalability / operational:** Prometheus retention capped at 6h and resources bounded so the stack
+  fits a laptop; documented tear-down.
+
+### Tests / verification
+- Cluster up; all Meridian pods Ready; Prometheus target `up{namespace="meridian"}` returns the three
+  services; a `POST /admin/failure error` visibly raises `http_requests_total{status="500"}`.
+- RBAC negative check: `kubectl auth can-i delete pods --as system:serviceaccount:aegis-system:...`
+  returns **no**.
+
+### How to run
+```bash
+export KIND=~/bin/kind.exe HELM=~/bin/helm.exe
+export KUBECTL="/c/Program Files/Docker/Docker/resources/bin/kubectl.exe"
+bash infra/setup-cluster.sh
+```
+
+### Verified (actual)
+- 6/6 Meridian pods Ready; Prometheus `up{namespace="meridian"}` = 6 targets.
+- Injected `error rate 0.7` on checkout → Prometheus showed ~670 `status="500"` vs ~1620 `status="200"`
+  over 1m, while `payment-service` stayed at 0 500s (per-service isolation holds).
+- RBAC: `auth can-i` for the SA → get pods **yes**, get pods/log **yes**, delete pods **no**,
+  patch deployments **no**, get secrets **no**.
+- Note: the kube-prometheus-stack config-reloader lags ~30–60s after the ServiceMonitor is created
+  before Prometheus loads the meridian scrape job — expected, not an error.
+
+### Follow-ups / open items
+- `inject-failure.sh error/latency` POSTs through the Service, so it lands on one of the 2 replicas
+  (partial-fleet fault). For a whole-service fault, scale to 1 replica or use `killpod`. Fine for MVP.

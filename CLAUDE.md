@@ -166,3 +166,10 @@ Each entry must include:
 - Architectural decision: **native Postgres enums** rather than String+CHECK for `incidents.state` (ESD §6.1) — equivalent guarantee, stronger + idiomatic; all states incl. V1.5 defined now to avoid an enum migration later. `audit_log` created as a monthly range-partitioned table with 13 pre-created partitions (ESD §17); rolling maintenance is a documented ops task. ESD unchanged (schema already specified these).
 - Environment: installed Python 3.12.10; `backend/.venv` created on it; all deps install cleanly (resolves the 3.14 wheel risk).
 - Tests: 27 unit tests pass (state machine + enum pinning); ruff lint+format clean; `alembic upgrade head` applies the full schema (tables, 13 partitions, HNSW index) against live Postgres+pgvector.
+
+### 2026-07-21 — Entry 3: Local cluster — kind + Meridian + Prometheus (Milestone 2)
+- Stood up the local chaos-testing environment (ESD §18): `infra/kind/cluster.yaml` (single-node `aegis`, host 9090→Prometheus, 9093→Alertmanager), Meridian Commerce simulator (`infra/meridian/`, one image → checkout/payment/catalog with `/metrics` + `POST /admin/failure`), kube-prometheus-stack via Helm (`infra/kube-prometheus-stack/values.yaml`, Grafana off), manifests (namespace, deployments/services/ServiceMonitor), and `setup-cluster.sh` + `inject-failure.sh`.
+- Safety: k8s MCP RBAC is **read-only** — ServiceAccount `aegis-k8s-mcp` bound to a meridian-namespaced Role with only get/list/watch on pods/logs/events/services/deploys/replicasets; no write verbs (ESD §16, PRD NFR). Verified via `kubectl auth can-i` (delete/patch/secrets → no).
+- Ran the CLAUDE.md §2 architecture review (new external dep: k8s + Prometheus) — reliability/safety/security/scalability notes in BUILD_LOG.
+- Tooling installed: kind 0.32.0, helm 4.2.3 (in `~/bin`); kubectl 1.34.1 from Docker Desktop.
+- Verified end-to-end: 6/6 pods Ready, Prometheus scrapes all 6 targets, injected error spike visible in Prometheus and isolated per service.

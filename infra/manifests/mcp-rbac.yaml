@@ -1,0 +1,43 @@
+# Least-privilege RBAC for the Kubernetes MCP server (ESD §16, PRD NFR-Security).
+# MVP is READ-ONLY: get/list/watch on pods + pod logs + deploy/replica/service/event topology,
+# scoped to the meridian namespace. NO write verbs (no delete, no patch, no exec, no secrets).
+# The V1.5 write verbs (delete pod, patch deployment/scale) are added in a later, separate change.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aegis-system
+  labels: { app.kubernetes.io/part-of: aegis }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aegis-k8s-mcp
+  namespace: aegis-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aegis-k8s-mcp-readonly
+  namespace: meridian
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aegis-k8s-mcp-readonly
+  namespace: meridian
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aegis-k8s-mcp-readonly
+subjects:
+  - kind: ServiceAccount
+    name: aegis-k8s-mcp
+    namespace: aegis-system

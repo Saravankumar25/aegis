@@ -1,0 +1,42 @@
+# Helm values for kube-prometheus-stack in the Aegis local cluster (ESD §19).
+# Trimmed for a laptop kind cluster: Grafana off, short retention, modest resources. Prometheus and
+# Alertmanager are exposed via fixed NodePorts that the kind config maps to host :9090 / :9093.
+
+grafana:
+  enabled: false
+
+# Pick up every ServiceMonitor/PodMonitor, not only those labelled with the Helm release, so the
+# Meridian ServiceMonitor is scraped without extra selector plumbing.
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090
+  prometheusSpec:
+    retention: 6h
+    scrapeInterval: 15s
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { cpu: 500m, memory: 900Mi }
+
+alertmanager:
+  service:
+    type: NodePort
+    nodePort: 30093
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+      limits: { cpu: 100m, memory: 128Mi }
+
+# Keep real infra signals (node + cluster state) — these are the metrics the Correlation Agent reads.
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 50m, memory: 100Mi }
+    limits: { cpu: 200m, memory: 256Mi }

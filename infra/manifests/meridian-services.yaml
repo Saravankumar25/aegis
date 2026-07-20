@@ -1,0 +1,138 @@
+# Meridian Commerce simulated services (ESD §18). One image, three services with different
+# SERVICE_NAME. Each exposes /metrics; a ServiceMonitor tells the Prometheus operator to scrape it.
+# Apply AFTER the kube-prometheus-stack Helm install (it provides the ServiceMonitor CRD).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+  namespace: meridian
+  labels: { app: checkout-service, app.kubernetes.io/part-of: meridian-commerce }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: checkout-service } }
+  template:
+    metadata:
+      labels: { app: checkout-service, app.kubernetes.io/part-of: meridian-commerce }
+    spec:
+      containers:
+        - name: app
+          image: aegis/meridian-service:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: SERVICE_NAME, value: checkout-service }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-service
+  namespace: meridian
+  labels: { app: checkout-service }
+spec:
+  selector: { app: checkout-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: meridian
+  labels: { app: payment-service, app.kubernetes.io/part-of: meridian-commerce }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: payment-service } }
+  template:
+    metadata:
+      labels: { app: payment-service, app.kubernetes.io/part-of: meridian-commerce }
+    spec:
+      containers:
+        - name: app
+          image: aegis/meridian-service:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: SERVICE_NAME, value: payment-service }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: meridian
+  labels: { app: payment-service }
+spec:
+  selector: { app: payment-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-service
+  namespace: meridian
+  labels: { app: catalog-service, app.kubernetes.io/part-of: meridian-commerce }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: catalog-service } }
+  template:
+    metadata:
+      labels: { app: catalog-service, app.kubernetes.io/part-of: meridian-commerce }
+    spec:
+      containers:
+        - name: app
+          image: aegis/meridian-service:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: SERVICE_NAME, value: catalog-service }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-service
+  namespace: meridian
+  labels: { app: catalog-service }
+spec:
+  selector: { app: catalog-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: meridian-services
+  namespace: meridian
+  labels: { release: kube-prometheus-stack }
+spec:
+  namespaceSelector: { matchNames: [meridian] }
+  selector:
+    matchLabels: {}  # all services in the namespace with a named "http" port
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
