@@ -36,6 +36,7 @@ class RCAResult(BaseModel):
     passes_succeeded: int = 0
     ensemble_degraded: bool = False
     models_used: list[str] = Field(default_factory=list)
+    latency_ms: int | None = None
     tokens_used: int = 0
     cost_usd: float = 0.0
     budget_degraded: bool = False
@@ -186,6 +187,7 @@ async def run_rca(
             passes_succeeded=0,
             ensemble_degraded=True,
             models_used=models_used,
+            latency_ms=max((r.latency_ms for r in results), default=None),
             tokens_used=sum(r.tokens_used for r in results),
             cost_usd=sum(r.cost_usd for r in results),
             budget_degraded=budget_degraded,
@@ -211,6 +213,7 @@ async def run_rca(
         passes_succeeded=len(passes),
         ensemble_degraded=ensemble_degraded,
         models_used=models_used,
+        latency_ms=max((r.latency_ms for r in results), default=None),
         tokens_used=sum(r.tokens_used for r in results),
         cost_usd=sum(r.cost_usd for r in results),
         budget_degraded=budget_degraded,

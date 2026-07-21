@@ -69,6 +69,8 @@ class RoutingOutcome:
     tokens_used: int = 0
     cost_usd: float = 0.0
     prompt_ref: str | None = None
+    model_used: str | None = None
+    latency_ms: int | None = None
 
 
 def available_steps(state: dict[str, Any]) -> list[str]:
@@ -209,6 +211,8 @@ async def decide(provider: Any, state: dict[str, Any]) -> RoutingOutcome:
             tokens_used=structured.result.tokens_used,
             cost_usd=structured.result.cost_usd,
             prompt_ref=structured.result.prompt_ref,
+            model_used=structured.result.model,
+            latency_ms=structured.result.latency_ms,
         )
 
     _log.info("supervisor_route", step=chosen, reasoning=decision.reasoning[:200])
@@ -219,4 +223,6 @@ async def decide(provider: Any, state: dict[str, Any]) -> RoutingOutcome:
         tokens_used=structured.result.tokens_used,
         cost_usd=structured.result.cost_usd,
         prompt_ref=structured.result.prompt_ref,
+        model_used=structured.result.model,
+        latency_ms=structured.result.latency_ms,
     )

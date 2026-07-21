@@ -37,6 +37,7 @@ from agents.topology import dependencies_of, dependents_of
 from core.config import get_settings
 from core.logging import get_logger
 from guardrails import guard_input, guard_output
+from providers.base import LLMResult
 from redaction.pipeline import EVIDENCE_RULES
 
 _log = get_logger(component="agent.correlation")
@@ -93,6 +94,9 @@ class CorrelationOutcome(BaseModel):
     calls_rejected: list[str] = Field(default_factory=list)
     tokens_used: int = 0
     cost_usd: float = 0.0
+    # Models that actually answered across planning rounds, not the provider name.
+    model_used: str | None = None
+    latency_ms: int | None = None
     prompt_refs: list[str] = Field(default_factory=list)
     llm_planned: bool = False
 
@@ -152,6 +156,10 @@ async def gather(
     rejected: list[str] = []
     tokens = 0
     cost = 0.0
+    # Models that actually answered across planning rounds. A set, because fallback can
+    # move rounds onto different models and reporting only the first would misattribute.
+    models: set[str] = set()
+    latency_total = 0
     refs: list[str] = []
     rounds = 0
     dispatched = 0
@@ -190,6 +198,8 @@ async def gather(
         plan = structured.value
         tokens += structured.result.tokens_used
         cost += structured.result.cost_usd
+        models.add(structured.result.model)
+        latency_total += structured.result.latency_ms
         if structured.result.prompt_ref:
             refs.append(structured.result.prompt_ref)
 
@@ -227,11 +237,13 @@ async def gather(
     if not store.items and not store.gaps:
         await _baseline_sweep(gateway, store, service)
 
-    synthesis, synth_tokens, synth_cost, synth_ref = await _synthesise(
-        provider, store, service=service, title=title
-    )
-    tokens += synth_tokens
-    cost += synth_cost
+    synthesis, synth_result = await _synthesise(provider, store, service=service, title=title)
+    synth_ref = synth_result.prompt_ref if synth_result else None
+    if synth_result is not None:
+        tokens += synth_result.tokens_used
+        cost += synth_result.cost_usd
+        models.add(synth_result.model)
+        latency_total += synth_result.latency_ms
     if synth_ref:
         refs.append(synth_ref)
 
@@ -261,6 +273,10 @@ async def gather(
         calls_rejected=rejected,
         tokens_used=tokens,
         cost_usd=cost,
+        # Summed, not maxed: correlation rounds are sequential, so the total is the time
+        # a human actually waited.
+        latency_ms=latency_total or None,
+        model_used=",".join(sorted(models)) or None,
         prompt_refs=refs,
         llm_planned=bool(refs),
     )
@@ -268,10 +284,16 @@ async def gather(
 
 async def _synthesise(
     provider: Any, store: EvidenceStore, *, service: str, title: str
-) -> tuple[CorrelationSynthesis | None, int, float, str | None]:
-    """Turn gathered evidence into a correlated picture."""
+) -> tuple[CorrelationSynthesis | None, LLMResult | None]:
+    """Turn gathered evidence into a correlated picture.
+
+    Returns the raw `LLMResult` rather than a widening tuple of extracted fields: the
+    caller needs model, latency, tokens, cost and prompt_ref, and threading five
+    positional values through made it easy to add an accounting field here and forget to
+    record it there — which is how `model_used` came to hold the provider name.
+    """
     if not store.items:
-        return None, 0, 0.0, None
+        return None, None
 
     settings = get_settings()
     prompt = CORRELATION_SYNTHESIS.render(
@@ -296,15 +318,10 @@ async def _synthesise(
         )
     except Exception as exc:  # noqa: BLE001 — RCA can still reason from raw evidence
         _log.warning("correlation_synthesis_unavailable", error=str(exc))
-        return None, 0, 0.0, None
+        return None, None
 
     guard_output(structured.value.summary, agent="correlation", require_grounding=True)
-    return (
-        structured.value,
-        structured.result.tokens_used,
-        structured.result.cost_usd,
-        structured.result.prompt_ref,
-    )
+    return structured.value, structured.result
 
 
 async def _baseline_sweep(gateway: Any, store: EvidenceStore, service: str) -> None:

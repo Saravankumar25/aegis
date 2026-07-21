@@ -15,10 +15,12 @@ import asyncio
 import contextlib
 import datetime
 import json
+import os
+import socket
 import uuid
 
 import asyncpg
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from agents.gateway import McpGateway
 from api.events import CHANNEL
@@ -39,6 +41,11 @@ STALE_AFTER = datetime.timedelta(minutes=10)
 
 class Worker:
     def __init__(self) -> None:
+        # Identifies this worker in the incident's ownership column. Host plus pid plus a
+        # random suffix: two replicas on one host, and a restarted process reusing a pid,
+        # must not be mistaken for the same owner — the second case would let a fresh
+        # worker adopt a lock it never took.
+        self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"[:64]
         self.log = get_logger(component="worker")
         self.sessionmaker = get_sessionmaker()
         self.gateway = McpGateway()
@@ -178,7 +185,18 @@ class Worker:
             self._in_flight.discard(incident_id)
 
     async def run_investigation(self, incident_id: str) -> None:
-        """Claim (open→investigating under row lock) and drive the graph to completion."""
+        """Claim exclusive ownership, then drive the graph to completion.
+
+        The row lock alone is not a claim. It is released at commit, and the graph then
+        runs for a minute or more outside it — so a second worker taking the lock a moment
+        later sees `investigating` and, because that state must stay claimable for
+        crash recovery, proceeds to investigate the same incident. Ownership therefore has
+        to be recorded on the row (migration 0008) and checked, not inferred from state.
+
+        An incident is claimable when it is `open`, or `investigating` with a lock that is
+        either absent or older than ``STALE_AFTER`` — the crashed-worker case the ESD §4
+        sweep exists to recover.
+        """
         async with self.sessionmaker() as session:
             row = (
                 await session.execute(
@@ -188,7 +206,10 @@ class Worker:
                 )
             ).scalar_one_or_none()
             if row is None:
+                # `skip_locked` returned nothing: another worker holds the row right now.
                 return
+
+            now = datetime.datetime.now(datetime.UTC)
             if row.state == IncidentState.open:
                 await IncidentRepository(session).record_transition(
                     row,
@@ -208,8 +229,25 @@ class Worker:
                         ),
                     )
                 )
-            elif row.state != IncidentState.investigating:
+            elif row.state == IncidentState.investigating:
+                held_by = row.investigation_locked_by
+                held_at = row.investigation_locked_at
+                owned_by_other = bool(held_by) and held_by != self.worker_id
+                lock_is_fresh = held_at is not None and held_at > now - STALE_AFTER
+                if owned_by_other and lock_is_fresh:
+                    self.log.info(
+                        "investigation_already_owned",
+                        incident_id=incident_id,
+                        owner=held_by,
+                    )
+                    return
+            else:
                 return  # already past investigation
+
+            # Taken inside the same transaction as the state check, so the row lock makes
+            # check-and-claim atomic against another worker doing the same thing.
+            row.investigation_locked_by = self.worker_id
+            row.investigation_locked_at = now
             state_snapshot = {
                 "incident_id": incident_id,
                 "service_name": row.service_name,
@@ -223,13 +261,39 @@ class Worker:
             await session.commit()
 
         log = get_logger(incident_id=incident_id, component="worker")
-        log.info("investigation_started")
+        log.info("investigation_started", worker_id=self.worker_id)
         # One LangSmith trace per investigation, tagged with the same incident_id used
         # everywhere else, so a production incident is findable by the id an operator has.
-        await self.graph.ainvoke(
-            state_snapshot,
-            config=trace_incident(incident_id, row.service_name, row.title),
-        )
+        try:
+            await self.graph.ainvoke(
+                state_snapshot,
+                config=trace_incident(incident_id, row.service_name, row.title),
+            )
+        finally:
+            # Released on failure as well as success. Holding the lock after a crash would
+            # be harmless (it ages out after STALE_AFTER) but it would delay recovery by
+            # exactly that window for a failure the sweep could otherwise retry at once.
+            await self._release_investigation_lock(incident_id)
+
+    async def _release_investigation_lock(self, incident_id: str) -> None:
+        """Drop this worker's claim, if it still holds it.
+
+        Conditioned on `investigation_locked_by = self.worker_id` so a worker whose lock
+        already aged out and was taken over cannot clear the new owner's claim on its way
+        out — otherwise a slow worker finishing late would unlock an incident another
+        worker is actively investigating, reintroducing the duplicate run.
+        """
+        with contextlib.suppress(Exception):
+            async with self.sessionmaker() as session:
+                await session.execute(
+                    update(Incident)
+                    .where(
+                        Incident.id == uuid.UUID(incident_id),
+                        Incident.investigation_locked_by == self.worker_id,
+                    )
+                    .values(investigation_locked_by=None, investigation_locked_at=None)
+                )
+                await session.commit()
 
     async def stop(self) -> None:
         if self._listen_conn is not None:

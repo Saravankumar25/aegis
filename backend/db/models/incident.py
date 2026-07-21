@@ -44,6 +44,14 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # fired rather than only which service it names (migration 0007).
     alert_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     alert_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which worker is currently investigating, and since when (migration 0008). The state
+    # alone cannot express this: `investigating` must stay claimable so the reconciliation
+    # sweep can recover incidents stranded by a crashed worker, which makes "being worked
+    # on right now" and "abandoned mid-investigation" the same state without an owner.
+    investigation_locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    investigation_locked_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     service_name: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[Severity] = mapped_column(Enum(Severity, name="severity"), nullable=False)
     state: Mapped[IncidentState] = mapped_column(

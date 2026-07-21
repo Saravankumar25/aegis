@@ -8,14 +8,29 @@ by the Correlation Agent through Prometheus.
 A background loop continuously simulates request traffic and applies the current failure mode, so the
 metrics reflect the injected fault even without external load. This is deliberately a *simulator*: it
 is the target environment Aegis investigates, not part of Aegis itself.
+
+Simulated traffic is **logged as well as counted**. Originally it only incremented Prometheus
+counters, which made the environment emit self-contradicting evidence: Prometheus reported a 31%
+error rate while `kubectl logs` showed nothing but healthy `/health` probes. Aegis's entire
+log-evidence path — fetch, redact, delimit, cite, ground a hypothesis on the citation — was
+therefore exercised against logs that could not possibly contain a failure, and the Observer
+correctly refused to approve any hypothesis about an error spike it could see no log evidence for.
+An investigation target whose signals disagree tests nothing except the refusal path.
+
+Error logs carry a plausible downstream cause rather than a bare "500", because the point of the
+environment is to give Correlation and RCA a real thread to pull: checkout failing *because* its
+payment dependency is timing out is an incident with a root cause, whereas a naked status code is
+a fact with nowhere to go.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
@@ -53,8 +68,48 @@ class FailureMode(BaseModel):
 _state = FailureMode()
 
 
+log = logging.getLogger("meridian")
+
+# Successful requests are sampled: a real service does not log every 200 at 20 rps, and a log
+# tail full of successes would bury the failures an investigator needs to see.
+SUCCESS_LOG_SAMPLE = float(os.environ.get("SUCCESS_LOG_SAMPLE", "0.02"))
+
+# The dependency each service blames when it fails, so a multi-service incident has a direction
+# for Correlation to follow rather than three services all reporting unrelated errors.
+_UPSTREAM = {
+    "checkout-service": "payment-service",
+    "payment-service": "catalog-service",
+}
+
+
+def _log_error(endpoint: str, request_id: str, latency: float) -> None:
+    """Emit an application error log resembling a real framework's output."""
+    upstream = _UPSTREAM.get(SERVICE_NAME)
+    if upstream:
+        log.error(
+            "request_id=%s %s %s -> 500 upstream=%s "
+            "error=UpstreamTimeout: connection to %s timed out after %dms "
+            "(pool exhausted, 0 idle connections)",
+            request_id,
+            "POST",
+            endpoint,
+            upstream,
+            upstream,
+            int(latency * 1000),
+        )
+    else:
+        log.error(
+            "request_id=%s %s %s -> 500 error=InternalError: "
+            "unhandled exception while serving request (duration=%dms)",
+            request_id,
+            "GET",
+            endpoint,
+            int(latency * 1000),
+        )
+
+
 def _simulate_one(endpoint: str) -> None:
-    """Simulate a single request, recording metrics per the active failure mode."""
+    """Simulate a single request, recording metrics and logs per the active failure mode."""
     base_latency = random.uniform(0.02, 0.12)
     affected = random.random() < _state.rate
     status = "200"
@@ -65,6 +120,24 @@ def _simulate_one(endpoint: str) -> None:
         latency = base_latency + _state.latency_ms / 1000.0
     REQUESTS.labels(SERVICE_NAME, endpoint, status).inc()
     LATENCY.labels(SERVICE_NAME, endpoint).observe(latency)
+
+    request_id = uuid.uuid4().hex[:12]
+    if status == "500":
+        _log_error(endpoint, request_id, latency)
+    elif affected and _state.mode == "latency":
+        log.warning(
+            "request_id=%s GET %s -> 200 slow_request duration=%dms threshold=500ms",
+            request_id,
+            endpoint,
+            int(latency * 1000),
+        )
+    elif random.random() < SUCCESS_LOG_SAMPLE:
+        log.info(
+            "request_id=%s GET %s -> 200 duration=%dms",
+            request_id,
+            endpoint,
+            int(latency * 1000),
+        )
 
 
 async def _traffic_loop() -> None:
@@ -80,6 +153,15 @@ async def _traffic_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Configured explicitly rather than relying on uvicorn's setup: uvicorn configures its own
+    # loggers only, so a bare `logging.getLogger("meridian")` inherits the root logger's default
+    # WARNING level and silently drops every INFO line — which is precisely the failure this
+    # module's docstring describes, one layer down.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        force=True,
+    )
     task = asyncio.create_task(_traffic_loop())
     try:
         yield

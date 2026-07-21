@@ -23,6 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from agents.accounting import LlmAccounting
 from agents.prompts.library import TRIAGE_SEVERITY
 from agents.topology import dependents_of
 from agents.triage.classifier import CRITICAL_SERVICES, IMPORTANT_SERVICES, classify_severity
@@ -51,7 +52,7 @@ class TriageJudgment(BaseModel):
     )
 
 
-class TriageOutcome(BaseModel):
+class TriageOutcome(LlmAccounting):
     """What Triage hands to the rest of the graph."""
 
     severity: Severity
@@ -61,9 +62,6 @@ class TriageOutcome(BaseModel):
     clamped: bool
     customer_impact: str
     reasoning: str
-    tokens_used: int = 0
-    cost_usd: float = 0.0
-    prompt_ref: str | None = None
     degraded: bool = False
 
 
@@ -149,7 +147,5 @@ async def assess(
         clamped=clamped,
         customer_impact=judgment.customer_impact,
         reasoning=judgment.reasoning,
-        tokens_used=structured.result.tokens_used,
-        cost_usd=structured.result.cost_usd,
-        prompt_ref=structured.result.prompt_ref,
+        **LlmAccounting.from_result(structured.result),
     )

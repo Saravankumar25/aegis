@@ -28,6 +28,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from agents.accounting import LlmAccounting
 from agents.evidence import EvidenceStore
 from agents.prompts.library import OBSERVER_CRITIQUE
 from core.logging import get_logger
@@ -64,7 +65,7 @@ class CritiqueResult(BaseModel):
         return self.verdict.strip().lower() == "approve"
 
 
-class CritiqueOutcome(BaseModel):
+class CritiqueOutcome(LlmAccounting):
     """What the critic contributes to the Observer verdict."""
 
     ran: bool
@@ -72,9 +73,6 @@ class CritiqueOutcome(BaseModel):
     reason: str
     unsupported_claims: list[str] = Field(default_factory=list)
     alternative_cause: str | None = None
-    tokens_used: int = 0
-    cost_usd: float = 0.0
-    prompt_ref: str | None = None
 
 
 def _claims_block(claims: list[dict], store: EvidenceStore) -> str:
@@ -144,7 +142,5 @@ async def critique(
         reason=result.reason,
         unsupported_claims=result.unsupported_claims,
         alternative_cause=result.alternative_cause,
-        tokens_used=structured.result.tokens_used,
-        cost_usd=structured.result.cost_usd,
-        prompt_ref=structured.result.prompt_ref,
+        **LlmAccounting.from_result(structured.result),
     )
