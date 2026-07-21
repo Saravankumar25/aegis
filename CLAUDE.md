@@ -2,7 +2,7 @@
 
 This file is the permanent operating guide for any AI agent (Claude Code or otherwise) working on this repository. Read it before starting any session. It is a living document: it is updated after every feature, not just at the start of the project.
 
-**Current phase:** MVP (investigation-only, read-only). V1.5 has not started. Do not build V1.5 features (Resolution, Communication, Memory, approvals, kill switch, circuit breakers) until MVP is fully done, tested, and marked complete below.
+**Current phase:** V1.5 (safe autonomous action), in progress. **MVP is complete** — built, tested (114 tests + eval harness), and verified end-to-end against the live kind cluster on 2026-07-21 (Feature Log Entry 5). V1.5 work (Resolution, Communication, Memory, approvals, kill switch, circuit breakers) is now in scope, each feature shipping with its safety mechanism in the same commit per Section 2.
 
 **Source of truth hierarchy:** PRD.md (what and why) → ESD.md (how, architecturally) → this file (day-to-day working rules). If code and ESD.md ever disagree, ESD.md is updated to match the code only if the deviation was a deliberate, reasoned improvement; otherwise the code is fixed to match ESD.md.
 
@@ -181,3 +181,11 @@ Each entry must include:
 - Security: k8s server authenticates with the dedicated `aegis-k8s-mcp` SA token (minted short-lived by `infra/gen-mcp-credentials.sh` into git-ignored files, TLS verified against the cluster CA); GitHub uses optional `GITHUB_TOKEN`; no credential committed or logged.
 - Tests: 48 passing (27 prior + contract tests against fixtures for all three servers + fault-injection: connection-kill/timeout/repeated-5xx → `unavailable` after exactly 3 attempts, malformed JSON → fail-fast `malformed_response`, 404 → `not_found`, recovery after upstream returns, backoff sequence asserted). Live-verified against the real cluster (SA token path), real Prometheus, and a real public GitHub repo.
 - Constraint surfaced: SA tokens from `kubectl create token` expire (24h default) — each session needs a re-mint; kind's API-server host port changes if the cluster is recreated (script prints the current `K8S_API_URL`).
+
+### 2026-07-21 — Entry 5: MVP complete — M4 redaction, M5 API, M6 agents/orchestrator/worker/RAG, M7 eval, M8 frontend
+- **M4** (FR-16/ESD §16): deterministic PII redaction (Luhn-checked cards; bearer-before-assignment ordering) + `<evidence>` delimiting with embedded-tag defang; the single middleware before embed/cache/log/prompt.
+- **M5** (FR-1.*, FR-9, FR-10.1, ESD §7/§8/§12): ingestion with idempotency + dedup window + deterministic severity; JWT httpOnly-cookie auth with refresh rotation and family-revocation on reuse (`refresh_sessions`, migration 0002); Postgres LISTEN/NOTIFY → SSE; replay endpoint; error envelope. New `tests/integration/` convention (§9 updated) against auto-migrated `aegis_test`.
+- **M6** (FR-2.*, FR-3.*, FR-8.1/8.2, ESD §4/§10/§24): LangGraph supervisor (triage→correlation→rca→observer, one bounded revision); evidence enters only through the redacting `EvidenceStore`; worker speaks **real MCP over stdio** (no infra credentials in the worker process); ensemble RCA with deterministic agreement scoring; deterministic LLM-free observer; hashing-embedder RAG + `/runbooks/search`. Deviation logged in ESD §25: no LangGraph Postgres checkpointer in MVP (read-only idempotent runs; re-run on crash), revisit at V1.5.
+- **M7** (ESD §22, PRD 9A): 12-scenario eval corpus + CI harness enforcing accuracy ≥85% (12/12) and hallucination <5% (0). Caught two real keyword-precision bugs.
+- **M8** (ESD §5, FR-9): Next.js 15 dashboard (all-incident SSE — endpoint added to ESD §7), live incident view with observer-validated citations, replay stepper, cookie-only auth. Deviation: minimal hand-rolled components instead of full shadcn/ui, documented.
+- **E2E verified live:** injected 70% error rate on checkout-service in kind → webhook → 4-agent investigation over real MCP (real logs/events/metrics; GitHub 409 degraded to a documented gap) → observer-validated hypothesis in seconds → dashboard/live view/replay all rendering; dedup merged a second alert; failure cleared.

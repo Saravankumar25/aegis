@@ -9,31 +9,21 @@ each piece. Source-of-truth hierarchy: PRD.md → ESD.md → CLAUDE.md → this 
 
 ## Current status / resume here (as of 2026-07-21)
 
-**Done & committed:** M0 (rename + scaffold), M1 (data layer), M2 (kind cluster + Meridian +
-Prometheus), M3 (read-only MCP servers — see the Milestone 3 section below). Nothing pushed yet
-(push is M8, to repo `aegis`).
+**MVP COMPLETE and verified end-to-end** (M0-M8; see Feature Log Entry 5 and the milestone
+sections below). 114 backend tests + eval harness green; live E2E: injected checkout failure →
+webhook → 4-agent investigation over real MCP stdio → observer-validated hypothesis → dashboard /
+live view / replay verified in the browser.
 
-**Next up: Milestone 4** — the natural next step is the redaction pipeline + evidence delimiting
-(ESD §16), since every downstream consumer of MCP evidence needs it; then agents/orchestrator
-(M5 pairs the ingestion API with the DB-backed idempotency test, per the M1 note). The MCP
-servers' `contains_untrusted_text` flag is the hook the redaction boundary consumes.
+**Now building V1.5** (safe autonomous action): safety substrate (leases, breakers, kill switch)
+→ k8s write tools + Resolution agent → approvals API + Communication agent + memory → V1.5
+frontend. Every autonomous-action feature ships with its safety mechanism in the same commit
+(CLAUDE.md §2).
 
-**Environment state to reconnect tomorrow:**
-- Tool binaries: `KIND=~/bin/kind.exe`, `HELM=~/bin/helm.exe`,
-  `KUBECTL="/c/Program Files/Docker/Docker/resources/bin/kubectl.exe"`. Backend venv is Python 3.12
-  at `backend/.venv`.
-- **Postgres/Redis:** `docker compose up -d` (Postgres on host **5433**, migration already applied to
-  the volume — re-run `alembic upgrade head` is a no-op).
-- **kind cluster `aegis`:** may still be running from today. Re-check with
-  `kubectl --context kind-aegis get pods -A`; if gone, `bash infra/setup-cluster.sh` rebuilds it
-  (~10 min). Prometheus at http://localhost:9090 once up.
-- Quick sanity: `cd backend && ./.venv/Scripts/python.exe -m pytest tests -q && ./.venv/Scripts/python.exe -m ruff check .` → 48 passing, clean.
-- **k8s MCP credential:** `bash infra/gen-mcp-credentials.sh` mints the git-ignored SA token/CA
-  (token lives 24h — re-mint each session); it prints the `K8S_API_URL` (kind's mapped port
-  changes if the cluster is recreated).
-
-**Open threads:** none blocking. M5 will add the DB-backed idempotency test for `upsert_incident`;
-GitHub push (M8) will need a PAT or `gh` (not installed).
+**Environment quick-start:** `docker compose up -d` (Postgres :5433) · kind cluster `aegis`
+(`bash infra/setup-cluster.sh` if gone; `gen-mcp-credentials.sh` re-mint each session, prints
+K8S_API_URL) · API `uvicorn api.main:app --port 8000` · worker `python -m worker.main` ·
+frontend `npm run dev` in frontend/ · seed: `python -m db.seed`, `python -m rag.seed` (local
+password `aegis-local-dev`).
 
 ---
 
