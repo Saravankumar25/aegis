@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     dedup_window_seconds: int = Field(default=300)
     rca_ensemble_passes: int = Field(default=3)
     incident_token_budget: int = Field(default=200_000)
+    deploy_lookback_hours: float = Field(default=2.0, description="FR-2.2 change window.")
+    rca_agreement_threshold: float = Field(
+        default=0.6, description="Below this, the hypothesis is flagged low-confidence."
+    )
 
     # --- Infra evidence sources (read-only MCP servers in MVP, ESD §3/§16) ---
     prometheus_url: str = Field(default="http://localhost:9090")

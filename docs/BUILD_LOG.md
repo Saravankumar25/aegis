@@ -376,3 +376,49 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
 - **Tests: 75 passing** (unit + contract + fault-injection + 9 integration: idempotency, dedup
   in/out of scope, envelope shape, login/me cookies, account-enumeration parity, rotation +
   reuse-detection killing the family, list requires auth).
+
+---
+
+## Milestone 6 — Providers, agents, orchestrator, worker, RAG
+
+**Status:** complete.
+
+- **Providers** (`providers/`, Strategy — ESD §20/§24): `LLMProvider` interface with full
+  per-call accounting (FR-8.2); default `StubProvider` is deterministic and **grounded by
+  construction** — it can only cite evidence ids present in the prompt's `<evidence>` blocks and
+  derives categories from keyword signals; ensemble-pass bias makes mixed-signal incidents
+  disagree (exercising FR-3.1 honestly with zero keys). Real Claude/Groq/Ollama providers are a
+  deliberate follow-up *after* the eval harness exists to measure them.
+- **Gateway** (`agents/gateway.py`): `McpGateway` speaks **real MCP over stdio** to the three
+  servers, each a subprocess with its own credential — the worker never holds infra credentials
+  (NFR-Security). Dead server ⇒ synthesized `unavailable` envelope ⇒ documented gap.
+  `FixtureGateway` for tests/eval.
+- **Evidence** (`agents/evidence.py`): all evidence enters via `EvidenceStore.add`, which redacts
+  + delimits exactly once — no bypass path to prompts/logs/DB (ESD §24). Snippets capped at 1500
+  chars for the token budget (ESD §15).
+- **Agents:** correlation (`collector.py`, FR-2.1..2.3 — temporal deploy-window × topological
+  service-neighborhood correlation, explicit gap notes); RCA (`engine.py` + `scoring.py`,
+  FR-3.1..3.3 — N ensemble passes, malformed-output retry-once-then-drop per ESD §12, agreement =
+  0.6·category + 0.4·citation-Jaccard pairwise mean, low-agreement flagged not averaged away,
+  budget degradation reduces passes); observer (`validator.py`, FR-3.2/FR-8.1 — deterministic,
+  **no LLM**: citation resolution + 9 injection patterns; claims citing flagged evidence rejected).
+- **Orchestrator** (`orchestrator/graph.py`, Supervisor — ESD §24): triage → correlation → rca →
+  observer, with ONE observer-triggered revision (flagged evidence stripped and recorded as gaps)
+  then forced finalize — bounded work per incident. Single `_persist` side-effect point per node:
+  step + message + citations + SSE in one transaction (ESD §4). Finalize: investigating →
+  hypothesis_formed, citations stamped observer-validated, audit entry.
+- **Worker** (`worker/main.py`, ESD §4): LISTEN wake-up (the ingestion NOTIFY), claim under
+  `FOR UPDATE SKIP LOCKED`, 60s reconciliation sweep for open + stale-investigating (>10 min
+  silent) incidents. **Decision (ESD §25 row added below): no LangGraph Postgres checkpointer in
+  MVP** — the investigation is read-only + idempotent, so crash recovery = re-run from scratch;
+  agent_steps/messages/transitions already persist everything replay needs. Revisit at V1.5
+  where runs gain side effects.
+- **RAG** (`rag/`): 768-dim deterministic hashing embedder behind an `Embedder` Strategy (BGE is
+  a drop-in later — same dim, same column); content-hash-versioned `upsert_runbook` (redacts
+  before embedding); pgvector cosine search; 4 seed runbooks (`eval/runbooks/`) + `python -m
+  rag.seed`; `GET /api/v1/runbooks/search` wired (completes the ESD §7 MVP surface).
+- **Tests: 98 passing.** New units: scoring math (6), observer validation + injection (7), stub
+  grounding (4), embedder (3). New integration: full-pipeline (fixtures→hypothesis_formed with
+  validated citations), **poisoned-logs pipeline** (observer rejects once, revision strips the
+  evidence, run still completes), all-sources-down (completes with ≥3 documented gaps, category
+  unknown).

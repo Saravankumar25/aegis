@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.errors import AegisError, install_error_handlers
 from api.events import hub
-from api.routes import auth, incidents
+from api.routes import auth, incidents, runbooks
 from core.config import get_settings
 from core.logging import configure_logging, get_logger
 
@@ -54,6 +54,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(incidents.router, prefix="/api/v1")
+    app.include_router(runbooks.router, prefix="/api/v1")
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, str]:
