@@ -39,6 +39,25 @@ def _envelope(error_code: str, message: str, incident_id: str | None = None) -> 
     return {"error_code": error_code, "message": message, "incident_id": incident_id}
 
 
+def error_response(
+    error_code: str,
+    message: str,
+    *,
+    status_code: int,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    """Build an error envelope directly, for callers that cannot raise.
+
+    ``@app.middleware("http")`` runs *outside* the exception-handler stack installed by
+    ``install_error_handlers``, so an ``AegisError`` raised there is never converted — it
+    escapes as an unhandled exception and the client sees an opaque 500 instead of the
+    intended status. Middleware must therefore return this rather than raise.
+    """
+    return JSONResponse(
+        status_code=status_code, content=_envelope(error_code, message), headers=headers
+    )
+
+
 def install_error_handlers(app: FastAPI) -> None:
     """Register the envelope handlers on the app."""
 
