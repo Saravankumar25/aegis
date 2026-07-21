@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agents.communication.composer import post_update
+from agents.communication.writer import post_update
 from agents.triage.classifier import classify_severity
 from api.deps import get_current_user, get_session, require_role
 from api.events import hub, publish_event
@@ -115,6 +115,8 @@ async def ingest_alert(
         title=alert.title,
         service_name=alert.service_name,
         severity=severity,
+        alert_kind=alert.kind,
+        alert_value=alert.value,
     )
     if created:
         await audit.write(

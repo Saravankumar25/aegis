@@ -17,17 +17,21 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from agents.communication.composer import post_update
-from agents.correlation.collector import collect_evidence
+from agents.communication.writer import post_update
+from agents.correlation.planner import gather
 from agents.evidence import EvidenceStore
+from agents.observer.critic import critique
 from agents.observer.validator import review
 from agents.rca.engine import RCAResult, run_rca
-from agents.triage.classifier import classify_severity
+from agents.triage.reasoner import assess
 from api.events import publish_event
+from core.config import get_settings
 from core.logging import get_logger
+from core.tracing import traced
 from db.enums import ActorType, AgentMessageType, EvidenceType, IncidentState
 from db.repository import AgentRepository, AuditRepository, IncidentRepository
 from memory.store import recall
+from orchestrator.supervisor import available_steps, decide
 from rag.store import search_runbooks
 
 
@@ -36,6 +40,8 @@ class InvestigationState(TypedDict, total=False):
     service_name: str
     title: str
     severity: str
+    alert_kind: str
+    alert_value: float | None
     evidence_store: Any  # EvidenceStore (kept opaque to LangGraph serialization)
     correlation_summary: str
     runbook_context: str
@@ -43,6 +49,8 @@ class InvestigationState(TypedDict, total=False):
     observer_verdict: Any  # ObserverVerdict
     revision_count: int
     tokens_used: int
+    completed_steps: list[str]
+    next_step: str
     final_state: str
 
 
@@ -69,10 +77,17 @@ def build_graph(services: InvestigationServices):
         tokens: int | None = None,
         cost: float | None = None,
         ensemble_pass: int | None = None,
+        prompt_ref: str | None = None,
         citations: list[dict] | None = None,
         event: str = "agent_step",
     ) -> None:
         """The single side-effect point: step + message + citations + SSE, one transaction."""
+        if prompt_ref:
+            # Folded into the jsonb rather than given its own column: it stays queryable
+            # (`structured_output->>'prompt_ref'`) and every step already carries a
+            # structured payload, so an eval run can attribute a score to the exact prompt
+            # version that produced it without a schema change per prompt-bearing agent.
+            structured = {**(structured or {}), "prompt_ref": prompt_ref}
         async with services.sessionmaker() as session:
             agents_repo = AgentRepository(session)
             step = await agents_repo.add_step(
@@ -108,14 +123,36 @@ def build_graph(services: InvestigationServices):
             )
             await session.commit()
 
+    @traced("agent:triage", run_type="chain")
     async def triage(state: InvestigationState) -> InvestigationState:
-        severity = classify_severity(state["service_name"], "error_rate")
+        outcome = await assess(
+            services.provider,
+            service=state["service_name"],
+            kind=state.get("alert_kind") or "other",
+            title=state["title"],
+            value=state.get("alert_value"),
+        )
+        detail = []
+        if outcome.escalated:
+            detail.append(f"escalated from {outcome.floor_severity}")
+        if outcome.clamped:
+            detail.append(f"model proposed {outcome.model_severity}, clamped to floor")
+        if outcome.degraded:
+            detail.append("model unavailable — rule-based floor used")
         message = (
-            f"Triage: {state['service_name']} classified {severity} "
-            f"(ingestion severity {state['severity']}); handing off to correlation."
+            f"Triage: {state['service_name']} assessed {outcome.severity}"
+            f"{' (' + '; '.join(detail) + ')' if detail else ''}. "
+            f"Customer impact: {outcome.customer_impact} {outcome.reasoning}"
         )
         await _persist(
-            state["incident_id"], "triage", message=message, structured={"severity": str(severity)}
+            state["incident_id"],
+            "triage",
+            message=message,
+            structured=outcome.model_dump(mode="json"),
+            model=services.provider.name if not outcome.degraded else None,
+            tokens=outcome.tokens_used,
+            cost=outcome.cost_usd,
+            prompt_ref=outcome.prompt_ref,
         )
         # FR-6.1: first plain-English update within 2 minutes of incident creation.
         async with services.sessionmaker() as session:
@@ -125,31 +162,69 @@ def build_graph(services: InvestigationServices):
                 incident_id=uuid.UUID(state["incident_id"]),
                 phase="opened",
                 service=state["service_name"],
-                severity=state["severity"],
+                severity=str(outcome.severity),
+                provider=services.provider,
             )
             await session.commit()
-        return state
+        return {
+            **state,
+            "severity": str(outcome.severity),
+            "tokens_used": state.get("tokens_used", 0) + outcome.tokens_used,
+        }
 
+    @traced("agent:correlation", run_type="chain")
     async def correlation(state: InvestigationState) -> InvestigationState:
-        store, summary = await collect_evidence(services.gateway, state["service_name"])
-        message = (
-            f"Correlation: gathered {len(store.items)} evidence item(s), "
-            f"{len(store.gaps)} source gap(s): {store.gaps or 'none'}."
+        outcome = await gather(
+            services.provider,
+            services.gateway,
+            service=state["service_name"],
+            title=state["title"],
+            severity=state.get("severity", "P3"),
         )
+        plan_note = (
+            f"{outcome.rounds_used} planning round(s), {outcome.calls_dispatched} tool call(s)"
+            if outcome.llm_planned
+            else "baseline sweep (planner unavailable)"
+        )
+        message = (
+            f"Correlation: {plan_note} → {len(outcome.store.items)} evidence item(s), "
+            f"{len(outcome.store.gaps)} gap(s): {outcome.store.gaps or 'none'}."
+        )
+        if outcome.synthesis:
+            message += f" {outcome.synthesis.summary[:600]}"
         await _persist(
             state["incident_id"],
             "correlation",
             message=message,
-            structured=json.loads(summary),
+            structured=json.loads(outcome.summary_json),
+            model=services.provider.name if outcome.llm_planned else None,
+            tokens=outcome.tokens_used,
+            cost=outcome.cost_usd,
+            prompt_ref=outcome.prompt_refs[0] if outcome.prompt_refs else None,
         )
-        return {**state, "evidence_store": store, "correlation_summary": summary}
+        return {
+            **state,
+            "evidence_store": outcome.store,
+            "correlation_summary": outcome.summary_json,
+            "tokens_used": state.get("tokens_used", 0) + outcome.tokens_used,
+            "completed_steps": [*state.get("completed_steps", []), "correlation"],
+        }
 
+    @traced("agent:rca", run_type="chain")
     async def rca(state: InvestigationState) -> InvestigationState:
         store: EvidenceStore = state["evidence_store"]
         async with services.sessionmaker() as session:
-            hits = await search_runbooks(session, f"{state['service_name']} {state['title']}", k=2)
+            # Metadata-filtered to this service: an OOM runbook for a service that is not the
+            # one on fire is a distractor the model has no way to discount.
+            hits = await search_runbooks(
+                session,
+                f"{state['service_name']} {state['title']}",
+                service=state["service_name"],
+            )
             memories = await recall(session, service_name=state["service_name"])
-        runbook_context = "\n---\n".join(f"[{r.title}] {r.content[:400]}" for r, _score in hits)
+        # Chunks carry their section, so the citation the model sees names the passage rather
+        # than the whole document.
+        runbook_context = "\n---\n".join(f"[{h.citation}] {h.content}" for h in hits)
         if memories:
             # FR-3.3/FR-7.3: approved past-incident summaries, compound-key scoped.
             runbook_context += (
@@ -166,6 +241,7 @@ def build_graph(services: InvestigationServices):
             title=state["title"],
             store=store,
             runbook_context=runbook_context,
+            correlation_summary=state.get("correlation_summary", ""),
             tokens_already_used=state.get("tokens_used", 0),
         )
         for i, ensemble in enumerate(result.passes):
@@ -214,24 +290,67 @@ def build_graph(services: InvestigationServices):
             **state,
             "rca_result": result,
             "tokens_used": state.get("tokens_used", 0) + result.tokens_used,
+            "completed_steps": [*state.get("completed_steps", []), "rca"],
+            # A fresh hypothesis invalidates the previous verdict; leaving it would let the
+            # supervisor route on a review of an analysis that no longer exists.
+            "observer_verdict": None,
         }
 
+    @traced("agent:observer", run_type="chain")
     async def observer(state: InvestigationState) -> InvestigationState:
         store: EvidenceStore = state["evidence_store"]
         result: RCAResult = state["rca_result"]
+
+        # Deterministic first, and it holds the veto (see agents/observer/critic.py).
         verdict = review(result.claims, store, root_cause_category=result.root_cause_category)
+
+        # Semantic critique runs only when the mechanical checks already passed. Running it
+        # on an already-rejected hypothesis would spend tokens on an outcome that cannot
+        # change: the critic can veto, never rescue.
+        critique_outcome = None
+        if verdict.approved:
+            critique_outcome = await critique(
+                services.provider,
+                hypothesis=result.hypothesis,
+                category=result.root_cause_category,
+                confidence=result.confidence,
+                claims=result.claims,
+                store=store,
+            )
+            if not critique_outcome.approved:
+                verdict = verdict.model_copy(
+                    update={
+                        "approved": False,
+                        "notes": f"{verdict.notes}; semantic critique rejected: "
+                        f"{critique_outcome.reason}",
+                    }
+                )
+
         message = (
             f"Observer: {'approved' if verdict.approved else 'REJECTED'} — {verdict.notes} "
             f"(flagged evidence: {[f['evidence_id'] for f in verdict.flagged_evidence] or 'none'})"
         )
+        structured = verdict.model_dump()
+        if critique_outcome is not None:
+            structured["semantic_critique"] = critique_outcome.model_dump(mode="json")
         await _persist(
             state["incident_id"],
             "observer",
             message=message,
-            structured=verdict.model_dump(),
+            structured=structured,
+            model=services.provider.name if critique_outcome and critique_outcome.ran else None,
+            tokens=critique_outcome.tokens_used if critique_outcome else None,
+            cost=critique_outcome.cost_usd if critique_outcome else None,
+            prompt_ref=critique_outcome.prompt_ref if critique_outcome else None,
             event="observer_verdict",
         )
-        return {**state, "observer_verdict": verdict}
+        return {
+            **state,
+            "observer_verdict": verdict,
+            "tokens_used": state.get("tokens_used", 0)
+            + (critique_outcome.tokens_used if critique_outcome else 0),
+            "completed_steps": [*state.get("completed_steps", []), "observer"],
+        }
 
     async def revise(state: InvestigationState) -> InvestigationState:
         """Strip injection-flagged evidence before the single allowed RCA retry (FR-8.1)."""
@@ -247,7 +366,13 @@ def build_graph(services: InvestigationServices):
             message=f"Revision requested: excluded {sorted(poisoned) or 'no'} evidence, "
             f"re-running RCA once.",
         )
-        return {**state, "revision_count": state.get("revision_count", 0) + 1}
+        return {
+            **state,
+            "revision_count": state.get("revision_count", 0) + 1,
+            "completed_steps": [*state.get("completed_steps", []), "revise"],
+            "rca_result": None,
+            "observer_verdict": None,
+        }
 
     async def finalize(state: InvestigationState) -> InvestigationState:
         verdict = state.get("observer_verdict")
@@ -330,6 +455,7 @@ def build_graph(services: InvestigationServices):
         )
         return {**state, "final_state": "hypothesis_formed"}
 
+    @traced("agent:resolution", run_type="chain")
     async def resolution(state: InvestigationState) -> InvestigationState:
         """V1.5 Resolution Agent node: propose (and gate-checked Tier-1 execute)."""
         from agents.resolution.engine import execute_action, propose_remediation
@@ -338,8 +464,9 @@ def build_graph(services: InvestigationServices):
         verdict = state.get("observer_verdict")
         result: RCAResult | None = state.get("rca_result")
         approved = bool(verdict and verdict.approved)
+        done = {**state, "completed_steps": [*state.get("completed_steps", []), "resolution"]}
         if result is None:
-            return state
+            return done
 
         # Pick a concrete unhealthy pod for pod-targeted actions.
         target_pod: str | None = None
@@ -361,7 +488,7 @@ def build_graph(services: InvestigationServices):
         async with services.sessionmaker() as session:
             incident = await IncidentRepository(session).get(uuid.UUID(state["incident_id"]))
             if incident is None:
-                return state
+                return done
             action = await propose_remediation(
                 session,
                 incident,
@@ -379,7 +506,7 @@ def build_graph(services: InvestigationServices):
                     f"'{result.root_cause_category}' — investigation stays with "
                     f"the on-call human.",
                 )
-                return state
+                return done
             if action.tier == 1:
                 action = await execute_action(
                     session, action, services.gateway, observer_approved=approved
@@ -428,28 +555,88 @@ def build_graph(services: InvestigationServices):
             },
             event="resolution",
         )
-        return state
+        return {**state, "completed_steps": [*state.get("completed_steps", []), "resolution"]}
 
-    def route_after_observer(state: InvestigationState) -> str:
-        verdict = state["observer_verdict"]
-        if verdict.approved or state.get("revision_count", 0) >= 1:
-            return "finalize"
-        return "revise"
+    @traced("agent:supervisor", run_type="chain")
+    async def supervisor(state: InvestigationState) -> InvestigationState:
+        """LLM routing decision, recorded as its own step so it is auditable and replayable."""
+        outcome = await decide(services.provider, dict(state))
+        await _persist(
+            state["incident_id"],
+            "orchestrator",
+            message=f"Supervisor → {outcome.step}: {outcome.reasoning}",
+            structured={
+                "next_step": outcome.step,
+                "llm_decided": outcome.llm_decided,
+                "overridden_from": outcome.overridden_from,
+                "available": available_steps(dict(state)),
+            },
+            model=services.provider.name if outcome.llm_decided else None,
+            tokens=outcome.tokens_used,
+            cost=outcome.cost_usd,
+            prompt_ref=outcome.prompt_ref,
+        )
+        return {
+            **state,
+            "next_step": outcome.step,
+            "tokens_used": state.get("tokens_used", 0) + outcome.tokens_used,
+        }
+
+    async def escalate(state: InvestigationState) -> InvestigationState:
+        """Hand to a human when the evidence cannot support a conclusion."""
+        await _persist(
+            state["incident_id"],
+            "orchestrator",
+            message="Escalated to a human: the gathered evidence does not support a "
+            "conclusion, and further automated passes would not change that.",
+            structured={"escalated": True},
+            event="escalated",
+        )
+        return await finalize(state)
+
+    def route_from_supervisor(state: InvestigationState) -> str:
+        """Read the supervisor's already-validated choice. No decision is made here."""
+        return state.get("next_step") or "finalize"
 
     graph = StateGraph(InvestigationState)
     graph.add_node("triage", triage)
+    graph.add_node("supervisor", supervisor)
     graph.add_node("correlation", correlation)
     graph.add_node("rca", rca)
     graph.add_node("observer", observer)
     graph.add_node("revise", revise)
     graph.add_node("finalize", finalize)
+    graph.add_node("escalate", escalate)
     graph.add_node("resolution", resolution)
+
     graph.set_entry_point("triage")
-    graph.add_edge("triage", "correlation")
-    graph.add_edge("correlation", "rca")
-    graph.add_edge("rca", "observer")
-    graph.add_conditional_edges("observer", route_after_observer)
-    graph.add_edge("revise", "rca")
-    graph.add_edge("finalize", "resolution")
-    graph.add_edge("resolution", END)
-    return graph.compile()
+    # Every completed step returns to the supervisor, which is what makes routing a decision
+    # rather than a fixed pipeline. The supervisor's choice is validated against
+    # `available_steps` before it is honoured, so the cycle is bounded by state, not by luck.
+    graph.add_edge("triage", "supervisor")
+    graph.add_conditional_edges(
+        "supervisor",
+        route_from_supervisor,
+        {
+            "correlation": "correlation",
+            "rca": "rca",
+            "observer": "observer",
+            "revise": "revise",
+            "resolution": "resolution",
+            "finalize": "finalize",
+            "escalate": "escalate",
+        },
+    )
+    graph.add_edge("correlation", "supervisor")
+    graph.add_edge("rca", "supervisor")
+    graph.add_edge("observer", "supervisor")
+    graph.add_edge("revise", "supervisor")
+    # Resolution returns to the supervisor rather than ending: proposing a remediation is a
+    # step in the investigation, not its conclusion. Routing it straight to END skipped
+    # `finalize`, so the incident never transitioned state and never wrote its audit record.
+    graph.add_edge("resolution", "supervisor")
+    graph.add_edge("finalize", END)
+    graph.add_edge("escalate", END)
+    # A cycle needs a hard stop independent of the routing logic: if the supervisor and the
+    # step bounds ever disagree, this ends the run instead of billing until the budget dies.
+    return graph.compile().with_config(recursion_limit=get_settings().graph_recursion_limit)

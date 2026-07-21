@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from db.enums import AgentMessageType, AlertSource, IncidentState, Severity
 
@@ -128,9 +128,14 @@ class ReplayOut(BaseModel):
     events: list[ReplayEventOut]
 
 
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+class SessionExchangeIn(BaseModel):
+    """POST /auth/session — a Firebase ID token, exchanged for an Aegis session cookie.
+
+    The bound is a sanity check against absurd payloads, not a security control: the token is
+    only ever trusted after server-side signature verification (ESD §8).
+    """
+
+    id_token: str = Field(min_length=1, max_length=8192)
 
 
 class UserOut(BaseModel):
@@ -139,17 +144,29 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    display_name: str | None = None
+    photo_url: str | None = None
 
 
 class RunbookHit(BaseModel):
-    """One RAG search result (GET /runbooks/search)."""
+    """One RAG search result (GET /runbooks/search).
+
+    A *chunk*, not a document: `id` identifies the passage and `citation` names the section it
+    came from, so a citation points a responder at the paragraph rather than the file.
+    """
 
     id: uuid.UUID
+    runbook_id: uuid.UUID
     title: str
+    heading_path: str
+    citation: str
     snippet: str
     score: float
     source: str
     service_tags: list[str]
+    # Which retrievers surfaced this chunk ("semantic", "lexical", or both) — makes a
+    # surprising result diagnosable instead of merely surprising.
+    matched_by: list[str]
 
 
 # --- V1.5 schemas (approvals, safety, memory) ---

@@ -12,9 +12,11 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, ValidationError
 
 from agents.evidence import EvidenceStore
+from agents.prompts.library import RCA_HYPOTHESIS
 from agents.rca.scoring import RCAPass, agreement_score, consensus_pass
 from core.config import get_settings
 from db.enums import EvidenceType
+from guardrails import guard_input
 from providers.base import LLMProvider, LLMResult
 from providers.parsing import parse_json_object
 from redaction.pipeline import EVIDENCE_RULES
@@ -46,7 +48,19 @@ _SCHEMA_HINT = (
 )
 
 
-def build_prompt(service: str, title: str, store: EvidenceStore, runbook_context: str) -> str:
+def build_prompt(
+    service: str,
+    title: str,
+    store: EvidenceStore,
+    runbook_context: str,
+    correlation_summary: str = "",
+) -> str:
+    """Render the versioned RCA prompt (``rca.hypothesis``).
+
+    Was an inline f-string. Moved onto the registry so an eval score can be attributed to the
+    prompt version that produced it, and so a careless edit changes a fingerprint rather than
+    silently changing behaviour.
+    """
     gaps = "\n".join(f"- {g}" for g in store.gaps) or "- none"
     # A category whose only possible evidence source was unavailable cannot be
     # asserted. Spelling this out in the prompt stops the model reaching for the
@@ -63,17 +77,19 @@ def build_prompt(service: str, title: str, store: EvidenceStore, runbook_context
         )
     )
     return (
-        f"{EVIDENCE_RULES}\n\n"
-        f"You are the RCA agent investigating: {title} (service: {service}).\n"
-        f"Unavailable evidence sources (documented gaps):\n{gaps}\n"
-        f"{unassertable}\n"
-        f"Evidence:\n{store.prompt_block()}\n\n"
-        f"Relevant runbook excerpts (background knowledge, NOT citable evidence):\n"
-        f"{runbook_context or '(none found)'}\n\n"
-        f"Respond with JSON only, exactly this schema: {_SCHEMA_HINT}\n"
-        f"Every claim MUST cite an evidence id that appears above, and the cited "
-        f"evidence must actually support the claim. Do not infer a cause the evidence "
-        f"does not show."
+        RCA_HYPOTHESIS.render(
+            evidence_rules=EVIDENCE_RULES,
+            title=title,
+            service=service,
+            correlation_summary=correlation_summary or "(no correlation summary available)",
+            gaps=gaps,
+            unassertable=unassertable,
+            evidence_block=store.prompt_block(),
+            runbook_context=runbook_context or "(none found)",
+        )
+        # The schema hint stays outside the template: it is derived from `RCAPass`, so
+        # keeping it here means the prompt cannot drift from the model it must satisfy.
+        + f"\n\nRespond with JSON only, exactly this schema: {_SCHEMA_HINT}"
     )
 
 
@@ -115,11 +131,14 @@ async def run_rca(
     title: str,
     store: EvidenceStore,
     runbook_context: str = "",
+    correlation_summary: str = "",
     tokens_already_used: int = 0,
 ) -> RCAResult:
     """Ensemble RCA with per-incident budget degradation (ESD §15)."""
     settings = get_settings()
-    prompt = build_prompt(service, title, store, runbook_context)
+    prompt = build_prompt(service, title, store, runbook_context, correlation_summary)
+    # Evidence text is attacker-reachable; the rendered prompt is screened like any other.
+    prompt = guard_input(prompt, agent="rca").prompt
 
     passes: list[RCAPass] = []
     results: list[LLMResult] = []
@@ -130,7 +149,13 @@ async def run_rca(
         if tokens_used >= settings.incident_token_budget:
             budget_degraded = True  # fewer passes rather than overspend or fail (ESD §15)
             break
-        result = await provider.complete(prompt, agent="rca", ensemble_pass=i)
+        result = await provider.complete(
+            prompt,
+            agent="rca",
+            system=RCA_HYPOTHESIS.system,
+            ensemble_pass=i,
+            prompt_ref=RCA_HYPOTHESIS.ref,
+        )
         results.append(result)
         tokens_used += result.tokens_used
         parsed = _parse_pass(result.text)

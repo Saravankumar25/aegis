@@ -13,6 +13,7 @@ import uuid
 from sqlalchemy import (
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     String,
     UniqueConstraint,
@@ -39,6 +40,10 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Enum(AlertSource, name="alert_source"), nullable=False
     )
     title: Mapped[str] = mapped_column(String, nullable=False)
+    # The alert's own context, preserved so the Triage agent can judge what actually
+    # fired rather than only which service it names (migration 0007).
+    alert_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     service_name: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[Severity] = mapped_column(Enum(Severity, name="severity"), nullable=False)
     state: Mapped[IncidentState] = mapped_column(

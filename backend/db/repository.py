@@ -39,6 +39,8 @@ class IncidentRepository:
         title: str,
         service_name: str,
         severity: Severity,
+        alert_kind: str | None = None,
+        alert_value: float | None = None,
     ) -> tuple[Incident, bool]:
         """Idempotently create-or-return an incident (PRD FR-10.1).
 
@@ -54,6 +56,8 @@ class IncidentRepository:
                 title=title,
                 service_name=service_name,
                 severity=severity,
+                alert_kind=alert_kind,
+                alert_value=alert_value,
                 state=IncidentState.open,
             )
             .on_conflict_do_nothing(constraint="uq_incidents_source_external_id")

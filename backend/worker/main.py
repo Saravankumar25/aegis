@@ -25,6 +25,7 @@ from api.events import CHANNEL
 from core.config import get_settings
 from core.db import get_sessionmaker
 from core.logging import configure_logging, get_logger
+from core.tracing import trace_incident
 from db.enums import ActorType, IncidentState
 from db.models import AgentStep, Incident
 from db.repository import IncidentRepository
@@ -108,7 +109,7 @@ class Worker:
             for action in actions:
                 action = await execute_action(session, action, self.gateway, observer_approved=True)
                 if action.status == RemediationStatus.executed and not action.shadow:
-                    from agents.communication.composer import post_update
+                    from agents.communication.writer import post_update
 
                     incident = await IncidentRepository(session).get(action.incident_id)
                     if incident is not None:
@@ -214,6 +215,8 @@ class Worker:
                 "service_name": row.service_name,
                 "title": row.title,
                 "severity": str(row.severity),
+                "alert_kind": row.alert_kind or "other",
+                "alert_value": row.alert_value,
                 "revision_count": 0,
                 "tokens_used": 0,
             }
@@ -221,7 +224,12 @@ class Worker:
 
         log = get_logger(incident_id=incident_id, component="worker")
         log.info("investigation_started")
-        await self.graph.ainvoke(state_snapshot)
+        # One LangSmith trace per investigation, tagged with the same incident_id used
+        # everywhere else, so a production incident is findable by the id an operator has.
+        await self.graph.ainvoke(
+            state_snapshot,
+            config=trace_incident(incident_id, row.service_name, row.title),
+        )
 
     async def stop(self) -> None:
         if self._listen_conn is not None:

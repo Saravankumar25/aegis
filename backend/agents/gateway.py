@@ -14,6 +14,7 @@ documented gap either way.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -24,11 +25,46 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from core.config import get_settings
 from core.logging import get_logger
+from core.redis import cache_get, cache_set
+from core.tracing import annotate, trace_span
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 ToolResultDict = dict[str, Any]
+
+
+# Cacheable tools, named explicitly. This is an allowlist rather than a denylist of writes
+# on purpose: with a denylist, a future write tool is cacheable until someone remembers to
+# exclude it, and the failure mode is returning a cached "success" for an action that was
+# never executed against the cluster. Anything not named here goes straight to the server.
+_CACHEABLE_READS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("k8s", "list_pods"),
+        ("k8s", "get_pod"),
+        ("k8s", "get_pod_logs"),
+        ("k8s", "list_events"),
+        ("k8s", "list_deployments"),
+        ("prometheus", "query_metrics"),
+        ("prometheus", "query_range_metrics"),
+        ("prometheus", "list_alerts"),
+        ("github", "get_recent_commits"),
+        ("github", "get_commit_diff"),
+        ("github", "list_pull_requests"),
+    }
+)
+
+
+def _evidence_cache_key(server: str, tool: str, arguments: dict | None) -> str | None:
+    """Stable cache key for a read-only tool call, or None if it must not be cached."""
+    if (server, tool) not in _CACHEABLE_READS:
+        return None
+    # sort_keys makes the key independent of argument ordering, so two callers asking the
+    # same question share an entry instead of each paying for their own round trip.
+    fingerprint = json.dumps(arguments or {}, sort_keys=True, default=str)
+    digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:32]
+    return f"mcp:{server}:{tool}:{digest}"
 
 
 def _unavailable(source: str, tool: str, reason: str) -> ToolResultDict:
@@ -82,10 +118,29 @@ class McpGateway:
         session = self._sessions.get(server)
         if session is None:
             return _unavailable(server, tool, "MCP server process not running")
-        try:
-            result = await session.call_tool(tool, arguments or {})
-            text = "".join(c.text for c in result.content if getattr(c, "text", None))
-            return json.loads(text)
-        except Exception as exc:  # noqa: BLE001 — degrade, never stall the run (ESD §12)
-            self._log.warning("mcp_call_failed", server=server, tool=tool, error=str(exc))
-            return _unavailable(server, tool, str(exc))
+
+        cache_key = _evidence_cache_key(server, tool, arguments)
+        if cache_key is not None:
+            cached = await cache_get(cache_key)
+            if cached is not None:
+                self._log.debug("mcp_cache_hit", server=server, tool=tool)
+                return cached
+
+        with trace_span(f"tool:{server}.{tool}", run_type="tool", arguments=arguments or {}):
+            try:
+                result = await session.call_tool(tool, arguments or {})
+                text = "".join(c.text for c in result.content if getattr(c, "text", None))
+                payload: ToolResultDict = json.loads(text)
+            except Exception as exc:  # noqa: BLE001 — degrade, never stall the run (ESD §12)
+                self._log.warning("mcp_call_failed", server=server, tool=tool, error=str(exc))
+                return _unavailable(server, tool, str(exc))
+            annotate(ok=payload.get("ok"), error_kind=payload.get("error_kind"))
+
+        # Only successful reads are cached. Caching a failure would turn one transient blip
+        # into a whole TTL of manufactured unavailability, and the ensemble's later passes
+        # are exactly when a recovered source should be picked up again.
+        if cache_key is not None and payload.get("ok"):
+            await cache_set(
+                cache_key, payload, ttl_seconds=get_settings().evidence_cache_ttl_seconds
+            )
+        return payload
