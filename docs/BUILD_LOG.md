@@ -545,3 +545,34 @@ Triggers: **new autonomous action types** (restart pod, scale deployment), **new
   auto-executes; **Tier-2 scale 2→3 then compensating action restores 2 (stateful fake — the
   reversal is proven on state, not on call counts)**; expired proposal refused; proposal
   idempotency.
+
+## V1.5c — Approvals API, Communication Agent, memory, Slack + PagerDuty-mock MCP
+
+**Status:** complete.
+
+- **Approvals** (FR-5): `GET /approvals` queue; `POST /incidents/{id}/approvals` — server-side
+  role check (viewer 403-tested), pending-only, expiry-checked (409 `proposal_expired`), Tier-3
+  approval refused outright (`tier3_manual_only`); approve → `remediation_approved` transition,
+  reject → terminal `rejected` (FR-5.2, never auto-retried). **Execution stays in the worker**
+  (sweep picks up `approved` under SKIP LOCKED) — the API never touches infrastructure (ESD §11).
+- **Safety endpoints**: breaker status (any role) / clear (admin); kill switch — engage
+  on_call+admin, **disengage admin-only**.
+- **Communication Agent** (FR-6): deterministic plain-English templates for all five FR-6.2
+  phases; unit test asserts NO jargon token (pod/k8s/5xx/p99/…) can leak into a stakeholder
+  update. Wired: opened (triage node — FR-6.1 ≪2min), root_cause (finalize, validated-only),
+  proposed/executed (resolution node + worker), resolved (resolve endpoint). Slack mirroring is
+  best-effort via the new **slack MCP server** (webhook from env; unconfigured = clean
+  non-delivery, never a blocker).
+- **Memory** (FR-7, on Postgres instead of Mem0 — same interface, one less dependency; ESD §25
+  candidate noted): `draft_summary` on resolution (symptom/root-cause/fix/outcome,
+  `approved_by NULL` = pending), `POST /memory/{id}/approve` with field-whitelisted edits,
+  `recall` returns **approved-only**, compound-key scoped (FR-7.3); RCA node now folds recalled
+  memories into its context (FR-3.3).
+- **New endpoints + state machine**: `POST /incidents/{id}/resolve` (also the MVP-gap fix — FR-9
+  wanted resolved incidents; nothing could resolve one); **state-machine change (called out per
+  CLAUDE.md §15):** added `remediation_proposed → resolved` so a rejected proposal doesn't strand
+  the incident. ESD §6.1/§7 updated.
+- **PagerDuty-mock MCP server**: fixture-replay engine over `eval/pagerduty_fixtures/`.
+- **Tests: 148 passing** (communication templates ×3, slack/pagerduty contract ×3, V1.5 API ×8:
+  RBAC, approval flow incl. double-decide 409, rejection→manual-resolve, expiry, kill-switch role
+  split, breaker trip/clear via API, memory draft→gate→scoped recall, edit-field whitelist).

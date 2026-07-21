@@ -21,7 +21,9 @@ LEGAL_TRANSITIONS: dict[IncidentState, frozenset[IncidentState]] = {
     S.hypothesis_formed: frozenset(
         {S.remediation_proposed, S.remediation_executed, S.monitoring, S.resolved}
     ),
-    S.remediation_proposed: frozenset({S.remediation_approved}),
+    # → resolved covers the FR-5.2 path: a human rejects the proposal and fixes the
+    # incident manually; without this edge a rejected proposal would strand the incident.
+    S.remediation_proposed: frozenset({S.remediation_approved, S.resolved}),
     S.remediation_approved: frozenset({S.remediation_executed}),
     S.remediation_executed: frozenset({S.monitoring}),
     S.monitoring: frozenset({S.resolved}),

@@ -13,8 +13,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.communication.composer import post_update
 from agents.triage.classifier import classify_severity
-from api.deps import get_current_user, get_session
+from api.deps import get_current_user, get_session, require_role
 from api.events import hub, publish_event
 from api.schemas import (
     AgentMessageOut,
@@ -28,9 +29,11 @@ from api.schemas import (
     TransitionOut,
 )
 from core.config import get_settings
-from db.enums import ActorType, IncidentState, Severity
+from db.enums import ActorType, IncidentState, Severity, UserRole
 from db.models import AgentMessage, AgentStep, Incident, IncidentStateTransition, User
 from db.repository import AuditRepository, IncidentRepository
+from db.state_machine import IllegalTransitionError
+from memory.store import draft_summary
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -267,6 +270,67 @@ async def incident_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/{incident_id}/resolve", response_model=IncidentOut)
+async def resolve_incident(
+    incident_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_role(UserRole.on_call_engineer, UserRole.admin)),
+) -> Incident:
+    """Human resolution (V1.5, ESD §7): closes the loop and drafts the memory summary.
+
+    Legal from hypothesis_formed / monitoring / remediation_proposed (the FR-5.2
+    rejected-and-fixed-manually path); the state machine rejects anything else.
+    """
+    repo = IncidentRepository(session)
+    incident = await repo.get(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident not found")
+    try:
+        await repo.record_transition(
+            incident,
+            IncidentState.resolved,
+            actor_type=ActorType.human,
+            actor_id=str(user.id),
+        )
+    except IllegalTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    incident.resolved_at = datetime.datetime.now(datetime.UTC)
+
+    # FR-7.1: draft the memory summary from the final validated RCA step (pending approval).
+    last_rca = (
+        await session.execute(
+            select(AgentStep)
+            .where(
+                AgentStep.incident_id == incident_id,
+                AgentStep.agent_name == "rca",
+                AgentStep.ensemble_pass_index.is_(None),
+            )
+            .order_by(AgentStep.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    output = last_rca.structured_output if last_rca and last_rca.structured_output else {}
+    await draft_summary(
+        session,
+        incident,
+        root_cause_category=str(output.get("root_cause_category", "unknown")),
+        hypothesis=str(output.get("hypothesis", "resolved without automated hypothesis")),
+    )
+    await post_update(
+        session,
+        None,  # Slack mirroring runs in the worker; API-side updates are dashboard-only
+        incident_id=incident_id,
+        phase="resolved",
+        service=incident.service_name,
+        severity=str(incident.severity),
+    )
+    await publish_event(session, incident_id, "state_changed", {"state": "resolved"})
+    # updated_at is server-generated (onupdate); refresh so serialization needs no lazy IO.
+    await session.flush()
+    await session.refresh(incident)
+    return incident
 
 
 @router.get("/{incident_id}/replay", response_model=ReplayOut)

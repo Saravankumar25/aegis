@@ -150,3 +150,69 @@ class RunbookHit(BaseModel):
     score: float
     source: str
     service_tags: list[str]
+
+
+# --- V1.5 schemas (approvals, safety, memory) ---
+
+
+class RemediationActionOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    incident_id: uuid.UUID
+    tier: int
+    action_type: str
+    target_resource_type: str
+    target_resource_id: str
+    status: str
+    reasoning: str
+    blast_radius: dict
+    compensating_action: dict
+    parameters: dict
+    shadow: bool
+    proposed_at: datetime.datetime
+    expires_at: datetime.datetime
+    executed_at: datetime.datetime | None
+    result: dict | None
+
+
+class PendingApprovalOut(BaseModel):
+    action: RemediationActionOut
+    incident_title: str
+    service_name: str
+    severity: Severity
+
+
+class ApprovalIn(BaseModel):
+    action_id: uuid.UUID
+    decision: str = Field(pattern="^(approved|rejected)$")
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class KillSwitchIn(BaseModel):
+    engaged: bool
+
+
+class BreakerStatusOut(BaseModel):
+    tripped: bool
+    open_trips: int
+    window_count: int
+
+
+class MemorySummaryOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    incident_id: uuid.UUID
+    service_name: str
+    incident_type: str
+    symptom: str
+    root_cause: str
+    fix: str
+    outcome: str
+    approved_by: uuid.UUID | None
+    created_at: datetime.datetime
+
+
+class MemoryApproveIn(BaseModel):
+    edits: dict[str, str] | None = None

@@ -46,7 +46,7 @@ def _unavailable(source: str, tool: str, reason: str) -> ToolResultDict:
 class McpGateway:
     """Real MCP stdio client sessions to the k8s / prometheus / github servers."""
 
-    SERVERS = ("k8s", "prometheus", "github")
+    SERVERS = ("k8s", "prometheus", "github", "slack")
 
     def __init__(self) -> None:
         self._stack: AsyncExitStack | None = None

@@ -45,3 +45,8 @@ pgdata/
 infra/.k8s-mcp-token
 infra/.k8s-mcp-ca.crt
 infra/.k8s-mcp-writer-token
+
+# Never commit local secret notes of any kind (CLAUDE.md §12)
+llm-api-keys.txt
+*api-key*
+*apikey*

@@ -17,6 +17,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from agents.communication.composer import post_update
 from agents.correlation.collector import collect_evidence
 from agents.evidence import EvidenceStore
 from agents.observer.validator import review
@@ -26,6 +27,7 @@ from api.events import publish_event
 from core.logging import get_logger
 from db.enums import ActorType, AgentMessageType, EvidenceType, IncidentState
 from db.repository import AgentRepository, AuditRepository, IncidentRepository
+from memory.store import recall
 from rag.store import search_runbooks
 
 
@@ -115,6 +117,17 @@ def build_graph(services: InvestigationServices):
         await _persist(
             state["incident_id"], "triage", message=message, structured={"severity": str(severity)}
         )
+        # FR-6.1: first plain-English update within 2 minutes of incident creation.
+        async with services.sessionmaker() as session:
+            await post_update(
+                session,
+                services.gateway,
+                incident_id=uuid.UUID(state["incident_id"]),
+                phase="opened",
+                service=state["service_name"],
+                severity=state["severity"],
+            )
+            await session.commit()
         return state
 
     async def correlation(state: InvestigationState) -> InvestigationState:
@@ -135,7 +148,18 @@ def build_graph(services: InvestigationServices):
         store: EvidenceStore = state["evidence_store"]
         async with services.sessionmaker() as session:
             hits = await search_runbooks(session, f"{state['service_name']} {state['title']}", k=2)
+            memories = await recall(session, service_name=state["service_name"])
         runbook_context = "\n---\n".join(f"[{r.title}] {r.content[:400]}" for r, _score in hits)
+        if memories:
+            # FR-3.3/FR-7.3: approved past-incident summaries, compound-key scoped.
+            runbook_context += (
+                "\n---\nPast approved incident memories for this service:\n"
+                + "\n".join(
+                    f"- [{m.incident_type}] symptom: {m.symptom}; cause: {m.root_cause}; "
+                    f"fix: {m.fix}"
+                    for m in memories
+                )
+            )
         result: RCAResult = await run_rca(
             services.provider,
             service=state["service_name"],
@@ -284,6 +308,23 @@ def build_graph(services: InvestigationServices):
                 {"approved": approved},
             )
             await session.commit()
+        # FR-6.2: root-cause-identified update, only for a validated hypothesis.
+        if approved and result is not None:
+            from agents.resolution.actions import recommend_action
+
+            spec = recommend_action(result.root_cause_category)
+            async with services.sessionmaker() as session:
+                await post_update(
+                    session,
+                    services.gateway,
+                    incident_id=uuid.UUID(state["incident_id"]),
+                    phase="root_cause",
+                    service=state["service_name"],
+                    severity=state["severity"],
+                    root_cause_category=result.root_cause_category,
+                    action_type=spec.action_type if spec else None,
+                )
+                await session.commit()
         get_logger(incident_id=state["incident_id"]).info(
             "investigation_complete", approved=approved
         )
@@ -342,6 +383,27 @@ def build_graph(services: InvestigationServices):
             if action.tier == 1:
                 action = await execute_action(
                     session, action, services.gateway, observer_approved=approved
+                )
+            # FR-6.2 updates: proposal awaiting approval, or a real (non-shadow) execution.
+            if action.tier >= 2 and action.status == RemediationStatus.proposed:
+                await post_update(
+                    session,
+                    services.gateway,
+                    incident_id=incident.id,
+                    phase="remediation_proposed",
+                    service=state["service_name"],
+                    severity=state["severity"],
+                    action_type=action.action_type,
+                )
+            elif action.status == RemediationStatus.executed and not action.shadow:
+                await post_update(
+                    session,
+                    services.gateway,
+                    incident_id=incident.id,
+                    phase="remediation_executed",
+                    service=state["service_name"],
+                    severity=state["severity"],
+                    action_type=action.action_type,
                 )
             await session.commit()
             status = action.status

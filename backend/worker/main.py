@@ -106,7 +106,21 @@ class Worker:
                 .all()
             )
             for action in actions:
-                await execute_action(session, action, self.gateway, observer_approved=True)
+                action = await execute_action(session, action, self.gateway, observer_approved=True)
+                if action.status == RemediationStatus.executed and not action.shadow:
+                    from agents.communication.composer import post_update
+
+                    incident = await IncidentRepository(session).get(action.incident_id)
+                    if incident is not None:
+                        await post_update(
+                            session,
+                            self.gateway,
+                            incident_id=incident.id,
+                            phase="remediation_executed",
+                            service=incident.service_name,
+                            severity=str(incident.severity),
+                            action_type=action.action_type,
+                        )
             await session.commit()
 
     async def reconcile(self) -> None:

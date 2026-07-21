@@ -237,7 +237,7 @@ open → investigating → hypothesis_formed
                                    ↖ reopened (from resolved or closed)
 ```
 
-Every transition is written to `incident_state_transitions` and validated against an explicit allow-list of legal `(from_state, to_state)` pairs at the application layer, backed by a Postgres CHECK constraint on `incidents.state` limiting it to the defined enum values. `remediation_executed` is unreachable from any state except `remediation_approved` (Tier-2/3) or directly from `hypothesis_formed` for Tier-1 (which auto-approves per FR-4.1), enforced in the same transition table.
+Every transition is written to `incident_state_transitions` and validated against an explicit allow-list of legal `(from_state, to_state)` pairs at the application layer, backed by a Postgres CHECK constraint on `incidents.state` limiting it to the defined enum values. `remediation_executed` is unreachable from any state except `remediation_approved` (Tier-2/3) or directly from `hypothesis_formed` for Tier-1 (which auto-approves per FR-4.1), enforced in the same transition table. V1.5c adds `remediation_proposed → resolved`: a human who rejects a proposal (FR-5.2) fixes the incident manually and resolves it; without this edge a rejected proposal would strand the incident.
 
 ## 7. API Specifications
 
@@ -255,6 +255,10 @@ All endpoints are versioned under `/api/v1`.
 | `/circuit-breaker/status` | GET | V1.5 | Current state of the global mass-action breaker |
 | `/circuit-breaker/clear` | POST | V1.5 | Manually clear a tripped breaker. Requires `admin` role. |
 | `/kill-switch` | POST | V1.5 | Immediate halt of all autonomous action. Requires `admin` role. |
+| `/approvals` | GET | V1.5 | Pending Tier-2 approval queue (added V1.5c; the approvals page needs a list source) |
+| `/incidents/{id}/resolve` | POST | V1.5 | Human resolution; drafts the FR-7.1 memory summary. Requires `on_call_engineer`/`admin` (added V1.5c) |
+| `/memory/pending` | GET | V1.5 | Draft memory summaries awaiting FR-7.2 approval (added V1.5c) |
+| `/memory/{id}/approve` | POST | V1.5 | Approve/edit a draft summary — the write-back gate. Requires `on_call_engineer`/`admin` (added V1.5c) |
 | `/auth/login` | POST | MVP | Issues httpOnly access + refresh cookies |
 | `/auth/refresh` | POST | MVP | Rotates refresh token, detects reuse |
 | `/auth/me` | GET | MVP | Current authenticated user and role |
