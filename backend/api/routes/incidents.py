@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.communication.writer import post_update
 from agents.triage.classifier import classify_severity
-from api.deps import get_current_user, get_session, require_role
+from api.deps import get_current_user, get_llm_provider, get_session, require_role
 from api.events import hub, publish_event
 from api.schemas import (
     AgentMessageOut,
@@ -34,6 +34,7 @@ from db.models import AgentMessage, AgentStep, Incident, IncidentStateTransition
 from db.repository import AuditRepository, IncidentRepository
 from db.state_machine import IllegalTransitionError
 from memory.store import draft_summary
+from providers.base import LLMProvider
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -279,6 +280,7 @@ async def resolve_incident(
     incident_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(require_role(UserRole.on_call_engineer, UserRole.admin)),
+    provider: LLMProvider = Depends(get_llm_provider),
 ) -> Incident:
     """Human resolution (V1.5, ESD §7): closes the loop and drafts the memory summary.
 
@@ -319,6 +321,10 @@ async def resolve_incident(
         incident,
         root_cause_category=str(output.get("root_cause_category", "unknown")),
         hypothesis=str(output.get("hypothesis", "resolved without automated hypothesis")),
+        # The Memory agent writes the lesson here rather than in the worker: resolution is a
+        # human action taken through the API, and the summary must exist by the time this
+        # request returns so it appears in the approval queue immediately.
+        provider=provider,
     )
     await post_update(
         session,

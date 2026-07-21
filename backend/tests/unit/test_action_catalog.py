@@ -1,9 +1,17 @@
-"""Unit tests: action catalog invariants (FR-4.1) and category mapping."""
+"""Unit tests: action catalog invariants (FR-4.1).
+
+The category→action mapping these tests once covered has been deleted: action selection is
+now the Resolution agent's reasoning (`agents/resolution/planner.py`), and a static mapping
+kept alongside it would be a second, silently diverging source of truth. What survives here
+are the invariants the *catalog* must hold regardless of who selects from it — those are
+what the planner's allowlist and the engine's tiering both depend on.
+"""
 
 from __future__ import annotations
 
-from agents.resolution.actions import CATALOG, CATEGORY_ACTION, recommend_action
+from agents.resolution.actions import CATALOG
 from agents.resolution.engine import estimate_blast_radius
+from agents.resolution.planner import PARAMETER_BOUNDS
 
 
 def test_every_action_is_pre_classified_with_documented_undo():
@@ -19,15 +27,19 @@ def test_tier3_actions_have_no_machine_execution_path():
         assert spec.mcp_server is None and spec.mcp_tool is None
 
 
-def test_category_mapping_only_references_cataloged_actions():
-    for action_type in CATEGORY_ACTION.values():
-        assert action_type is None or action_type in CATALOG
+def test_catalog_keys_match_their_action_type():
+    """The planner looks specs up by the key the model names; a mismatch would execute
+    one action under another's tier and compensating action."""
+    for key, spec in CATALOG.items():
+        assert key == spec.action_type
 
 
-def test_error_spike_and_unknown_recommend_nothing():
-    assert recommend_action("error_spike") is None
-    assert recommend_action("unknown") is None
-    assert recommend_action("never-heard-of-it") is None
+def test_every_tunable_parameter_has_declared_bounds():
+    """A parameter the model can set but Python cannot clamp is an unbounded instruction."""
+    assert "replicas_delta" in PARAMETER_BOUNDS
+    for name, (low, high) in PARAMETER_BOUNDS.items():
+        assert low <= high, name
+        assert low >= 1, f"{name} lower bound must be a real change, not a no-op"
 
 
 def test_blast_radius_uses_topology():

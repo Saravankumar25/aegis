@@ -15,6 +15,7 @@ import uuid
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agents.communication.writer import post_update
@@ -23,14 +24,16 @@ from agents.evidence import EvidenceStore
 from agents.observer.critic import critique
 from agents.observer.validator import review
 from agents.rca.engine import RCAResult, run_rca
+from agents.resolution.planner import plan_remediation
 from agents.triage.reasoner import assess
 from api.events import publish_event
 from core.config import get_settings
 from core.logging import get_logger
 from core.tracing import traced
 from db.enums import ActorType, AgentMessageType, EvidenceType, IncidentState
+from db.models import RemediationAction
 from db.repository import AgentRepository, AuditRepository, IncidentRepository
-from memory.store import recall
+from memory.store import recall_relevant
 from orchestrator.supervisor import available_steps, decide
 from rag.store import search_runbooks
 
@@ -225,7 +228,21 @@ def build_graph(services: InvestigationServices):
                 f"{state['service_name']} {state['title']}",
                 service=state["service_name"],
             )
-            memories = await recall(session, service_name=state["service_name"])
+            # Relevance-judged rather than most-recent-three: an unrelated memory presented
+            # as precedent drags RCA toward the wrong cause, and "same service" is the
+            # weakest similarity signal available.
+            store_for_memory: EvidenceStore | None = state.get("evidence_store")
+            recall_outcome = await recall_relevant(
+                session,
+                services.provider,
+                service_name=state["service_name"],
+                title=state["title"],
+                kind=state.get("alert_kind") or "other",
+                symptoms=(
+                    store_for_memory.prompt_block()[:2000] if store_for_memory else state["title"]
+                ),
+            )
+            memories = recall_outcome.memories
         # Chunks carry their section, so the citation the model sees names the passage rather
         # than the whole document.
         runbook_context = "\n---\n".join(f"[{h.citation}] {h.content}" for h in hits)
@@ -443,10 +460,19 @@ def build_graph(services: InvestigationServices):
             await session.commit()
         # FR-6.2: root-cause-identified update, only for a validated hypothesis.
         if approved and result is not None:
-            from agents.resolution.actions import recommend_action
-
-            spec = recommend_action(result.root_cause_category)
             async with services.sessionmaker() as session:
+                # The action actually proposed, read back rather than re-derived from the
+                # category. The old code re-ran a category→action lookup here, which could
+                # name an action the Resolution agent had considered and rejected — telling
+                # stakeholders one thing while the system did another.
+                proposed = (
+                    await session.execute(
+                        select(RemediationAction)
+                        .where(RemediationAction.incident_id == uuid.UUID(state["incident_id"]))
+                        .order_by(RemediationAction.proposed_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
                 await post_update(
                     session,
                     services.gateway,
@@ -455,7 +481,7 @@ def build_graph(services: InvestigationServices):
                     service=state["service_name"],
                     severity=state["severity"],
                     root_cause_category=result.root_cause_category,
-                    action_type=spec.action_type if spec else None,
+                    action_type=proposed.action_type if proposed else None,
                 )
                 await session.commit()
         get_logger(incident_id=state["incident_id"]).info(
@@ -493,6 +519,20 @@ def build_graph(services: InvestigationServices):
                 candidates[0]["name"] if candidates else None,
             )
 
+        # The action is *chosen* by the Resolution agent before any database work, so the
+        # reasoning that justifies it is recorded on the proposal rather than reconstructed
+        # from the category afterwards.
+        store: EvidenceStore | None = state.get("evidence_store")
+        decision = await plan_remediation(
+            services.provider,
+            root_cause_category=result.root_cause_category,
+            hypothesis=result.hypothesis,
+            service=state["service_name"],
+            severity=state["severity"],
+            target_pod=target_pod,
+            evidence_block=store.prompt_block() if store is not None else "",
+        )
+
         async with services.sessionmaker() as session:
             incident = await IncidentRepository(session).get(uuid.UUID(state["incident_id"]))
             if incident is None:
@@ -504,15 +544,30 @@ def build_graph(services: InvestigationServices):
                 hypothesis=result.hypothesis,
                 observer_approved=approved,
                 target_pod=target_pod,
+                decision=decision,
             )
             if action is None:
                 await session.commit()
+                if decision.invalid_selection:
+                    detail = (
+                        f"agent requested '{decision.invalid_selection}', which is not in the "
+                        f"action catalog — refused"
+                    )
+                elif decision.degraded:
+                    detail = decision.reasoning
+                else:
+                    detail = decision.reasoning or "no catalogued action addresses this cause"
                 await _persist(
                     state["incident_id"],
                     "resolution",
-                    message=f"Resolution: no mechanical action for category "
-                    f"'{result.root_cause_category}' — investigation stays with "
-                    f"the on-call human.",
+                    message=f"Resolution: no action proposed. {detail}",
+                    structured=decision.model_dump(mode="json", exclude={"spec"}),
+                    confidence=decision.confidence or None,
+                    model=decision.model_used,
+                    latency_ms=decision.latency_ms,
+                    tokens=decision.tokens_used,
+                    cost=decision.cost_usd,
+                    prompt_ref=decision.prompt_ref,
                 )
                 return done
             if action.tier == 1:
@@ -560,7 +615,19 @@ def build_graph(services: InvestigationServices):
                 "shadow": action.shadow,
                 "blast_radius": action.blast_radius,
                 "compensating_action": action.compensating_action,
+                # The agent's own decision record, so the UI and any later audit can show
+                # why this action was chosen and what was considered instead.
+                "reasoning": decision.reasoning,
+                "alternatives_rejected": decision.alternatives_rejected,
+                "expected_effect": decision.expected_effect,
+                "clamped": decision.clamped,
             },
+            confidence=decision.confidence or None,
+            model=decision.model_used,
+            latency_ms=decision.latency_ms,
+            tokens=decision.tokens_used,
+            cost=decision.cost_usd,
+            prompt_ref=decision.prompt_ref,
             event="resolution",
         )
         return {**state, "completed_steps": [*state.get("completed_steps", []), "resolution"]}

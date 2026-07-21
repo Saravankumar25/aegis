@@ -12,6 +12,8 @@ from api.security import ACCESS_COOKIE, decode_token
 from core.db import get_sessionmaker
 from db.enums import UserRole
 from db.models import User
+from providers.base import LLMProvider
+from providers.factory import get_provider
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -50,3 +52,13 @@ def require_role(*roles: UserRole):
         return user
 
     return guard
+
+
+def get_llm_provider() -> LLMProvider:
+    """The configured LLM provider, as a dependency.
+
+    A dependency rather than a direct `get_provider()` call so tests can override it:
+    without this the resolve endpoint made a live model call inside the integration suite,
+    which made it slow, non-deterministic, and dependent on upstream quota to pass.
+    """
+    return get_provider()

@@ -110,9 +110,15 @@ async def api_client(db_url: str, session: AsyncSession) -> AsyncIterator[httpx.
     core_db._engine = None
     core_db._sessionmaker = None
 
+    from api.deps import get_llm_provider
     from api.main import create_app
 
     app = create_app()
+    # No live model calls from the integration suite. Without this, resolving an incident
+    # invoked the Memory agent against the real provider, which made these tests slow,
+    # non-deterministic, and dependent on upstream quota to pass. `None` exercises the
+    # documented degradation path, which is itself worth covering here.
+    app.dependency_overrides[get_llm_provider] = lambda: None
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://testserver",

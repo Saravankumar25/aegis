@@ -65,18 +65,3 @@ CATALOG: dict[str, ActionSpec] = {
         },
     ),
 }
-
-# root_cause_category → action recommendation (None = investigation only).
-CATEGORY_ACTION: dict[str, str | None] = {
-    "resource_exhaustion": "restart_pod",
-    "latency_degradation": "scale_deployment",
-    "deploy_regression": "rollback_deploy",
-    "error_spike": None,  # symptom, not a mechanical fix — stays with the human
-    "unknown": None,
-}
-
-
-def recommend_action(root_cause_category: str) -> ActionSpec | None:
-    """Deterministic category→action mapping; unknown categories recommend nothing."""
-    action_type = CATEGORY_ACTION.get(root_cause_category)
-    return CATALOG[action_type] if action_type else None

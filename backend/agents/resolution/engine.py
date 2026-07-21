@@ -16,7 +16,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agents.resolution.actions import ActionSpec, recommend_action
+from agents.resolution.actions import ActionSpec
+from agents.resolution.planner import ResolutionDecision
 from agents.topology import dependents_of
 from api.events import publish_event
 from core.config import get_settings
@@ -43,6 +44,37 @@ def estimate_blast_radius(service_name: str) -> dict[str, Any]:
     return {"service": service_name, "dependents": dependents, "count": len(dependents)}
 
 
+def _format_reasoning(
+    *,
+    decision: ResolutionDecision,
+    root_cause_category: str,
+    hypothesis: str,
+    spec: ActionSpec,
+    target_id: str,
+    tier: int,
+    observer_approved: bool,
+) -> str:
+    """Render the approval-facing justification for a proposed action."""
+    parts = [
+        f"Resolution agent chose {spec.action_type} on {target_id} "
+        f"(confidence {decision.confidence:.2f}).",
+        f"Why: {decision.reasoning}",
+    ]
+    if decision.expected_effect:
+        parts.append(f"Expected effect: {decision.expected_effect}")
+    if decision.alternatives_rejected:
+        parts.append("Alternatives rejected: " + "; ".join(decision.alternatives_rejected))
+    if decision.clamped:
+        # An approver must see that the agent asked for more than it was allowed.
+        parts.append("Parameters clamped to catalog bounds: " + "; ".join(decision.clamped))
+    parts.append(
+        f"Grounded in RCA hypothesis ({root_cause_category}): {hypothesis}. "
+        f"Catalog tier {spec.tier}, effective tier {tier} after rate-limit check; "
+        f"observer_approved={observer_approved}."
+    )
+    return "\n".join(parts)
+
+
 async def propose_remediation(
     session: AsyncSession,
     incident: Incident,
@@ -51,15 +83,23 @@ async def propose_remediation(
     hypothesis: str,
     observer_approved: bool,
     target_pod: str | None = None,
+    decision: ResolutionDecision | None = None,
 ) -> RemediationAction | None:
     """Create (idempotently) the remediation proposal for a validated hypothesis.
 
-    Returns None when the category maps to no action, or when the identical proposal
-    already exists (the unique idempotency key absorbs re-runs).
+    ``decision`` carries the Resolution agent's LLM choice. It is passed in rather than made
+    here so that this function stays a pure persistence-and-safety step: everything below
+    determines *tier, expiry, blast radius, shadow status and idempotency*, none of which the
+    model participates in. A caller that omits it gets no proposal, because acting without
+    recorded reasoning is the failure mode the whole agent exists to prevent.
+
+    Returns None when no action was chosen, when the chosen action needs a target that was
+    never identified, or when the identical proposal already exists (the unique idempotency
+    key absorbs re-runs).
     """
-    spec: ActionSpec | None = recommend_action(root_cause_category)
-    if spec is None:
+    if decision is None or decision.spec is None:
         return None
+    spec: ActionSpec = decision.spec
 
     settings = get_settings()
     service = incident.service_name
@@ -71,8 +111,8 @@ async def propose_remediation(
     else:
         target_id = f"meridian/deployment/{service}"
         parameters = {"name": service}
-        if spec.action_type == "scale_deployment":
-            parameters["replicas_delta"] = 1  # relief step: +1 replica
+    # Model-chosen values, already clamped to the catalog's declared bounds by the planner.
+    parameters.update(decision.parameters)
 
     tier = await effective_tier(session, service, spec.tier)
     idempotency_key = f"{incident.id}:{spec.action_type}:{target_id}"
@@ -94,11 +134,20 @@ async def propose_remediation(
         idempotency_key=idempotency_key,
         parameters=parameters,
         compensating_action=spec.compensating,
-        reasoning=(
-            f"RCA hypothesis ({root_cause_category}): {hypothesis} — recommended "
-            f"{spec.action_type} on {target_id}; catalog tier {spec.tier}, effective "
-            f"tier {tier} after rate-limit check; observer_approved={observer_approved}."
-        ),  # FR-4.3: full reasoning logged before any execution
+        # FR-4.3: full reasoning logged before any execution. The agent's own justification
+        # leads, because that is what a human approving this at 3am actually needs to weigh;
+        # the deterministic facts (tiering, clamping) follow as provenance. Recording only
+        # the machine-generated sentence, as before, told an approver nothing about *why*
+        # this action was believed to address this cause.
+        reasoning=_format_reasoning(
+            decision=decision,
+            root_cause_category=root_cause_category,
+            hypothesis=hypothesis,
+            spec=spec,
+            target_id=target_id,
+            tier=tier,
+            observer_approved=observer_approved,
+        ),
         blast_radius=estimate_blast_radius(service),
         status=RemediationStatus.proposed,
         proposed_at=_now(),

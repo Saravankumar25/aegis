@@ -23,6 +23,28 @@ from db.repository import IncidentRepository
 from safety.kill_switch.switch import set_kill_switch
 
 
+def _decision(action_type: str, **parameters):
+    """A fixed Resolution decision, so these tests exercise the gates rather than selection.
+
+    Action choice is the Resolution agent's LLM reasoning (covered in
+    `tests/unit/test_resolution_planner.py`). What is under test here is everything that
+    happens *after* a choice: tiering, expiry, shadow mode, the four execution gates and the
+    compensating action. Pinning the choice keeps a model-behaviour change from turning these
+    safety assertions red for an unrelated reason.
+    """
+    from agents.resolution.actions import CATALOG
+    from agents.resolution.planner import ResolutionDecision
+
+    return ResolutionDecision(
+        spec=CATALOG[action_type],
+        reasoning=f"test fixture selected {action_type}",
+        confidence=0.9,
+        parameters=parameters,
+        model_used="test-model",
+    )
+
+
+
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
@@ -135,6 +157,7 @@ async def test_tier1_shadow_mode_executes_nothing(session: AsyncSession):
         hypothesis="pod is OOM-looping",
         observer_approved=True,
         target_pod="checkout-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     assert action is not None and action.tier == 1 and action.shadow is True
     action = await execute_action(session, action, gateway, observer_approved=True)
@@ -154,6 +177,7 @@ async def test_tier1_real_execution_restarts_pod(session: AsyncSession, monkeypa
         hypothesis="pod is OOM-looping",
         observer_approved=True,
         target_pod="checkout-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     assert action.shadow is False
     action = await execute_action(session, action, gateway, observer_approved=True)
@@ -175,6 +199,7 @@ async def test_kill_switch_blocks_everything(session: AsyncSession, monkeypatch)
         hypothesis="x",
         observer_approved=True,
         target_pod="checkout-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     action = await execute_action(session, action, gateway, observer_approved=True)
     assert action.status == RemediationStatus.proposed  # untouched
@@ -195,6 +220,7 @@ async def test_tier1_blast_radius_gate_escalates(session: AsyncSession, monkeypa
         hypothesis="x",
         observer_approved=True,
         target_pod="payment-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     action = await execute_action(session, action, gateway, observer_approved=True)
     assert action.status == RemediationStatus.proposed
@@ -212,6 +238,7 @@ async def test_unvalidated_hypothesis_never_auto_executes(session: AsyncSession,
         hypothesis="x",
         observer_approved=False,
         target_pod="checkout-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     action = await execute_action(session, action, gateway, observer_approved=False)
     assert action.status == RemediationStatus.proposed
@@ -229,6 +256,7 @@ async def test_tier2_scale_execution_and_compensating_reversal(session: AsyncSes
         root_cause_category="latency_degradation",
         hypothesis="saturation",
         observer_approved=True,
+        decision=_decision("scale_deployment", replicas_delta=1),
     )
     assert action.tier == 2
     assert incident.state == IncidentState.remediation_proposed
@@ -267,6 +295,7 @@ async def test_expired_proposal_cannot_execute(session: AsyncSession, monkeypatc
         hypothesis="x",
         observer_approved=True,
         target_pod="checkout-service-abc-1",
+        decision=_decision("restart_pod"),
     )
     action.expires_at = _now() - datetime.timedelta(minutes=1)
     await session.flush()
@@ -282,7 +311,27 @@ async def test_proposal_is_idempotent(session: AsyncSession):
         "hypothesis": "x",
         "observer_approved": True,
         "target_pod": "checkout-service-abc-1",
+        "decision": _decision("restart_pod"),
     }
     a1 = await propose_remediation(session, incident, **kwargs)
     a2 = await propose_remediation(session, incident, **kwargs)
     assert a1.id == a2.id  # same idempotency key → same row, no duplicate
+
+
+async def test_no_decision_proposes_nothing(session: AsyncSession):
+    """A proposal without recorded reasoning is not a proposal.
+
+    Guards the contract that made `decision` required: acting on infrastructure with no
+    justification attached is precisely what the Resolution agent exists to prevent, so an
+    omitted decision must produce nothing rather than falling back to a default action.
+    """
+    incident = await _incident(session, "checkout-service")
+    action = await propose_remediation(
+        session,
+        incident,
+        root_cause_category="resource_exhaustion",
+        hypothesis="x",
+        observer_approved=True,
+        target_pod="checkout-service-abc-1",
+    )
+    assert action is None
