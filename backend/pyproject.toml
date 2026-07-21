@@ -20,13 +20,26 @@ dependencies = [
     "redis>=5.0",
     "httpx>=0.27",
     "python-jose[cryptography]>=3.3",
-    "passlib[bcrypt]>=1.7",
+    # Firebase ID-token verification (ESD §8). The reference implementation is used rather
+    # than hand-rolled JWKS verification because this is a security boundary; its blocking
+    # calls are dispatched to a worker thread so the event loop is never held.
+    "firebase-admin>=6.5",
     "langgraph>=0.2",
     "langchain-core>=0.2",
     "mcp>=1.2",
+    # Local ONNX embedding + reranking (ESD §20). Chosen over sentence-transformers to avoid
+    # a ~2.5GB torch dependency for the same BGE model quality.
+    "fastembed>=0.8",
 ]
 
 [project.optional-dependencies]
+# LLM-judged evaluation. Deliberately NOT a runtime dependency: ragas pulls ~37 packages
+# (pandas, pyarrow, datasets, langchain, openai) and shipping those into the production image
+# to support a CI-only measurement is a poor trade. The deterministic retrieval gate in
+# `evaluation/retrieval_metrics.py` needs none of this and runs on every commit.
+eval = [
+    "ragas>=0.4",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -37,6 +50,8 @@ dev = [
 [tool.setuptools]
 packages = [
     "agents",
+    "evaluation",
+    "guardrails",
     "api",
     "core",
     "db",
@@ -66,3 +81,8 @@ select = ["E", "F", "I", "B", "C4", "UP"]
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    # Loads a real ONNX model from the local cache. Slower than the rest of the unit suite
+    # and needs a one-time model download, so it is separable: `-m "not embedding"`.
+    "embedding: exercises the real local embedding/reranker model",
+]

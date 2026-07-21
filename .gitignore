@@ -53,3 +53,14 @@ llm-api-keys.txt
 
 # TypeScript incremental build artifact
 frontend/tsconfig.tsbuildinfo
+
+# Local credential notes provided by the operator (service-account keys, Firebase config)
+firebase-details.txt
+*service-account*.json
+*serviceAccount*.json
+
+# Service-account keys and other local secret material (CLAUDE.md §12)
+.secrets/
+
+# Locally cached embedding / reranker ONNX models (fetched on first use, never committed)
+.model-cache/

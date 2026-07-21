@@ -27,13 +27,50 @@ class Settings(BaseSettings):
         description="SQLAlchemy async URL for the single Postgres instance.",
     )
 
-    # --- Redis (cache only, never a source of truth, ESD §11) ---
+    # --- Redis (cache + rate limiting only, never a source of truth, ESD §11) ---
     redis_url: str = Field(default="redis://localhost:6379/0")
+    redis_max_connections: int = Field(default=20)
+    redis_timeout_seconds: float = Field(default=2.0)
+    # Read-only MCP evidence cache. Short by design: the RCA ensemble makes several passes
+    # over the same window within seconds, but infrastructure state moves fast enough that a
+    # long TTL would let one incident's evidence bleed into the next.
+    evidence_cache_ttl_seconds: int = Field(default=30)
+    # HTTP rate limit, per client per window. DoS protection only — the load-bearing
+    # remediation limits live in Postgres (safety/), not here.
+    api_rate_limit_per_window: int = Field(default=120)
+    api_rate_limit_window_seconds: int = Field(default=60)
+    # Ingestion is a machine-to-machine path with a genuinely higher legitimate rate: an
+    # alert storm is exactly when Aegis must not start dropping alerts.
+    ingest_rate_limit_per_window: int = Field(default=600)
 
     # --- Auth (self-issued JWT in httpOnly cookies, ESD §8) ---
+    # Firebase supplies *identity* only; Aegis still issues and owns the session, so the
+    # browser's durable credential stays an httpOnly cookie (CLAUDE.md §12).
     jwt_secret: str = Field(default="change-me-generate-a-long-random-string")
     jwt_access_ttl_seconds: int = Field(default=900)
     jwt_refresh_ttl_seconds: int = Field(default=604800)
+
+    # --- Firebase Authentication / Google OAuth (ESD §8) ---
+    # The ID token's audience must equal this project id, so it is a security control,
+    # not a convenience field: a token minted for another project is rejected.
+    firebase_project_id: str = Field(default="")
+    # Path to the gitignored service-account JSON. The key itself is NEVER inlined here
+    # and never logged (CLAUDE.md §12).
+    firebase_service_account_file: str = Field(default="../.secrets/firebase-service-account.json")
+
+    # --- OAuth role allowlists (fail closed, CLAUDE.md §12) ---
+    # Any authenticated email absent from both lists is provisioned `viewer`, which cannot
+    # approve a remediation. There is no path by which an unknown Google account is elevated.
+    aegis_admin_emails: str = Field(default="")
+    aegis_approver_emails: str = Field(default="")
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.aegis_admin_emails.split(",") if e.strip()}
+
+    @property
+    def approver_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.aegis_approver_emails.split(",") if e.strip()}
 
     # --- LLM provider (Strategy pattern, ESD §20). Real models only — there is no
     # stub/offline provider. Keys come from env, never committed (CLAUDE.md §12). ---
@@ -56,6 +93,10 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=2500)
     llm_max_tokens_on_truncation: int = Field(default=4000)
     llm_timeout_seconds: float = Field(default=90.0)
+    # Schema-repair budget for structured outputs. Each repair feeds the validation error
+    # back to the model; two is enough to fix formatting without burning quota on a model
+    # that fundamentally cannot satisfy the schema.
+    llm_structured_repair_attempts: int = Field(default=2)
 
     @property
     def openrouter_key_list(self) -> list[str]:
@@ -64,6 +105,60 @@ class Settings(BaseSettings):
     @property
     def llm_fallback_list(self) -> list[str]:
         return [m.strip() for m in self.llm_model_fallbacks.split(",") if m.strip()]
+
+    # --- RAG: embedding model (ESD §20). Local ONNX BGE — no per-call cost, no network at
+    # request time. Changing model/dim requires migrating the pgvector columns to match;
+    # the embedder fails loudly at load if they disagree. ---
+    embedding_model: str = Field(default="BAAI/bge-small-en-v1.5")
+    embedding_dim: int = Field(default=384)
+    # Kept inside the repo (gitignored) rather than the OS temp dir, which is periodically
+    # cleared and would silently re-download the model on an incident-response path.
+    embedding_cache_dir: str = Field(default="../.model-cache")
+    embedding_batch_size: int = Field(default=32)
+
+    # --- RAG: chunking (ESD §20) ---
+    chunk_max_chars: int = Field(default=1200)
+    chunk_overlap_chars: int = Field(default=150)
+    chunk_min_chars: int = Field(default=80)
+
+    # --- RAG: retrieval ---
+    rag_top_k: int = Field(default=5, description="Chunks returned to the caller.")
+    # Over-fetch before reranking: a cross-encoder can only reorder what retrieval handed it,
+    # so the candidate pool must be wider than the final k or reranking cannot recover a hit
+    # that vector search ranked 12th.
+    rag_candidate_k: int = Field(default=30)
+    rag_rerank_enabled: bool = Field(default=True)
+    rag_reranker_model: str = Field(default="Xenova/ms-marco-MiniLM-L-6-v2")
+    # Reciprocal Rank Fusion constant. 60 is the value from the original RRF paper and damps
+    # the influence of any single retriever's top rank.
+    rag_rrf_k: int = Field(default=60)
+    rag_min_score: float = Field(
+        default=0.0, description="Drop hits below this fused score; 0 disables the filter."
+    )
+
+    # --- LangSmith tracing (ESD §13). Unset = tracing is a no-op; an observability
+    # backend must never be able to stall an investigation. ---
+    langsmith_api_key: str = Field(default="")
+    langsmith_project: str = Field(default="aegis")
+    langsmith_endpoint: str = Field(default="https://api.smith.langchain.com")
+
+    # --- Agentic loop bounds (ESD §15: bounded work per incident). These are enforced in
+    # Python, never requested in a prompt — an agent that could talk itself past them would
+    # turn a prompt injection in a pod log into an unbounded spend. ---
+    correlation_max_rounds: int = Field(
+        default=3, description="Plan→dispatch→observe iterations before synthesis."
+    )
+    correlation_max_calls_per_round: int = Field(default=4)
+    # How many times the supervisor may route back to correlation. "Gather more evidence" is
+    # always a plausible next step, so without a cap a model that favours it never concludes.
+    correlation_max_invocations: int = Field(default=2)
+    supervisor_max_revisions: int = Field(
+        default=1, description="RCA re-runs the supervisor may request."
+    )
+    # Hard stop on the supervisor cycle, independent of the routing logic. If the supervisor
+    # and the step bounds ever disagree, LangGraph ends the run rather than billing until the
+    # token budget dies.
+    graph_recursion_limit: int = Field(default=25)
 
     # --- Incident tuning (PRD FR-1.2, FR-3.1; ESD §15) ---
     dedup_window_seconds: int = Field(default=300)
