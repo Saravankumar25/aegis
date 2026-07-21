@@ -535,3 +535,70 @@ Each entry must include:
   deterministic; the frontend has not been touched this entry and still lacks search, filters,
   profile, notifications and general settings; `/health` and `/metrics` live at `/api/v1/*`, not
   the paths ESD §7 documents; and `/docs`, `/redoc`, `/openapi.json` are publicly exposed.
+
+### 2026-07-21 — Entry 14: Phase 1 end-to-end validation against the live cluster (V2g)
+- **Credentials wired without asking.** Two additional Gemini keys and a LangSmith key were
+  detected in the operator's notes file and health-checked individually before use (all 5 Gemini
+  keys answered 200). No credential was requested, and none is committed.
+- **LangSmith had never emitted a trace, and the reason was not "unconfigured".**
+  `tracing_enabled()` constructed a `langsmith.Client` and returned True — but the SDK's
+  `traceable`/`trace` helpers read the **process environment** and no-op unless
+  `LANGSMITH_TRACING` is truthy, while pydantic-settings loads `.env` into a settings object
+  without exporting it. The constructed Client was passed nowhere. Every span was silently
+  discarded for two releases while the log line said `langsmith_enabled`. Now bridged
+  explicitly, with `flush()` for short-lived processes. **Verified: 17 runs land per
+  investigation, tagged by `incident_id`.**
+- **Enabling tracing exposed a latent production bug it had been hiding.** `trace_span` was
+  `try: with trace(): yield / except Exception: yield`. When the traced *body* raises, that
+  exception is thrown into the generator at the yield, caught by the except, and answered with a
+  **second yield** — which contextlib converts into `RuntimeError: generator didn't stop after
+  throw()`, destroying the caller's exception. With tracing on, `ProviderExhausted` stopped
+  matching `except ProviderExhausted`, so the "degrade throughput, never truthfulness" path
+  silently stopped working. Enter/exit are now guarded separately, `yield` happens exactly once
+  on every path, and `sys.exc_info()` is forwarded so a failing block records as a failed span.
+- **New convention — a daily quota is per *key* unless the vendor bills per account.** Gemini
+  keys carry independent per-project quotas, so raising `DailyQuotaExhausted` on the first capped
+  key stranded the other four and reported the system out of capacity with 80% of it idle.
+  Rotation, throttle cooldowns and quota state now live in `providers/keypool.py`: throttled keys
+  are demoted but never dropped (a cooldown must not turn a blip into an outage), capped keys are
+  skipped, and the pool-level error is raised only when every key is capped. The OpenRouter
+  provider deliberately keeps the opposite semantics — its keys share one account.
+- **The investigation target emitted self-contradicting evidence, and the Observer was right to
+  refuse.** Meridian's traffic simulator incremented Prometheus counters but wrote **no log
+  line**, so Prometheus reported a 31% error rate while `kubectl logs` showed nothing but healthy
+  `/health` probes. The entire log-evidence path was being exercised against logs that could not
+  possibly contain a failure. Two consecutive investigations escalated without an approved
+  hypothesis — correct behaviour on contradictory evidence, and indistinguishable from bad
+  reasoning until the environment was examined. The simulator now logs errors carrying a
+  plausible downstream cause (`checkout -> payment UpstreamTimeout, pool exhausted`), because a
+  naked status code is a fact with nowhere to go whereas a dependency failure is a thread to
+  pull. **The first run after the fix produced an observer-approved, citation-grounded
+  hypothesis naming connection pool exhaustion.**
+- **Agent attribution was recording the wrong thing.** `model_used` held the *provider* name
+  ("gemini") on every row, so two incidents that behaved differently looked identical — defeating
+  the stated reason the provider owns tracing. `latency_ms` was never written at all despite the
+  column existing since migration 0001. Accounting is hoisted into `agents/accounting.py` so a
+  new field is one edit rather than five, which is how these diverged.
+- **Two workers could investigate one incident concurrently (migration 0008).** The claim took
+  `FOR UPDATE SKIP LOCKED`, but the lock releases at commit and the graph then runs for a minute
+  outside it; a second worker arriving in that window sees `investigating` and proceeds, because
+  that state must stay claimable for the ESD §4 crash-recovery sweep. Observed live: one
+  incident, two complete sets of agent steps, two hypotheses, double the spend. Ownership is now
+  recorded on the row and checked, distinguishing *actively owned* from *abandoned*; a stale lock
+  is still reclaimable. The release is conditioned on still being the owner, so a slow worker
+  finishing late cannot unlock an incident another worker has since taken over.
+- **New convention — a skipped test is not a passing test.** The suite reported "274 passing"
+  while 54 integration tests silently skipped on missing Postgres and `fastembed` was declared
+  but uninstalled. The skip count is the number worth reading.
+- **Verified live, not just in tests:** full pipeline over real MCP against kind, real Gemini
+  reasoning at every agent, observer-validated citations, IP redaction applied to evidence
+  snippets (`http://[REDACTED_IP]:8080/health`), LangSmith traces tagged by incident id.
+  **335 tests pass, 0 skipped**; ruff clean; frontend lint, typecheck and build clean.
+- **Still open, explicitly not done:** Phases 3–6 were not started — the RAG relevance floor
+  (`rag_min_score=0.0`) is unchanged and the `unanswerable` golden case still fails; Resolution
+  and Memory remain deterministic; RAGAS/DeepEval have still never executed; the frontend still
+  lacks search, filters, profile, notifications and a general settings page. There is **no
+  `escalated` state**, so an escalated incident sits in `hypothesis_formed`, indistinguishable
+  from one still in flight. LangSmith chain runs report `tokens=0` — per-run token attribution is
+  not propagating. `/health` and `/metrics` remain at `/api/v1/*` rather than the paths ESD §7
+  documents, and `/docs`, `/redoc` and `/openapi.json` are publicly exposed.
