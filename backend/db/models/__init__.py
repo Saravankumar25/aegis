@@ -18,6 +18,7 @@ from db.models.remediation import (
     SystemFlag,
 )
 from db.models.runbook import Runbook
+from db.models.runbook_chunk import RunbookChunk
 from db.models.user import User
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "AgentMessage",
     "EvidenceCitation",
     "Runbook",
+    "RunbookChunk",
     "User",
     "AuditLog",
     "RefreshSession",

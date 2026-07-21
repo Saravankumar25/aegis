@@ -1,52 +1,126 @@
 """Embedding Strategy for the runbook corpus (ESD §20: open-source, no per-call cost).
 
-Default is a deterministic 768-dim hashed bag-of-words embedder: dependency-free, instant,
-and good enough for keyword-heavy operational text on a 3-service corpus. The interface is
-the contract — swapping in BGE (the ESD §20 target) is a provider change, not a schema
-change, because both emit 768-dim L2-normalized vectors into the same pgvector column.
+Runs **BGE locally through ONNX** (`fastembed`) rather than a hosted embedding API or a
+PyTorch stack. The reasoning, in the terms that actually decided it:
+
+* *Retrieval quality* — BGE is a genuine semantic model. The embedder it replaces was a hashed
+  bag-of-words, which scores ~0 for a query sharing no literal tokens with the document; the
+  operational corpus is full of exactly that mismatch ("out of memory" vs `OOMKilled`).
+* *Deployment* — ONNX Runtime pulls ~90MB of dependencies against ~2.5GB for torch, which is
+  the difference between a reasonable container image and an unreasonable one.
+* *Offline capability* — the model is fetched once and cached on disk; every call after that is
+  local. Nothing here reaches the network at request time, so CLAUDE.md §18 (local-first, no
+  hard dependency on a paid cloud service) holds.
+* *Cost and scalability* — zero per-call cost, batching built in, and swapping model or
+  dimension is configuration rather than code.
+
+**Asymmetric encoding matters.** BGE is trained with an instruction prefix on the *query* side
+only. `fastembed` applies it via `query_embed`, so queries and passages go through different
+entry points here deliberately — using one for both measurably degrades retrieval.
+
+Inference is CPU-bound and synchronous, so every public entry point is async and dispatches to
+a worker thread: embedding a batch inline would stall the event loop for every concurrent
+incident (CLAUDE.md §3).
 """
 
 from __future__ import annotations
 
-import hashlib
-import math
-import re
+import threading
 from abc import ABC, abstractmethod
+from functools import lru_cache
+from pathlib import Path
 
-DIM = 768
-_TOKEN = re.compile(r"[a-z0-9_]{2,}")
+import anyio
+
+from core.config import get_settings
+from core.logging import get_logger
+
+_log = get_logger(component="embedding")
 
 
 class Embedder(ABC):
-    """Embedding strategy: text → 768-dim L2-normalized vector."""
+    """Embedding strategy: text → a fixed-width L2-normalized vector."""
 
     name: str = "base"
+    dim: int = 0
 
     @abstractmethod
-    def embed(self, text: str) -> list[float]: ...
+    async def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        """Embed documents for storage."""
+
+    @abstractmethod
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed a search query (instruction-prefixed for BGE-family models)."""
 
 
-class HashingEmbedder(Embedder):
-    """Deterministic hashed bag-of-words with sublinear term weighting."""
+class FastEmbedEmbedder(Embedder):
+    """Local ONNX BGE embedder.
 
-    name = "hashing-768"
+    The model is loaded lazily and once. Loading costs seconds and tens of megabytes of RAM,
+    so doing it at import time would penalise every process that never embeds anything —
+    including the API, which only embeds on a search request.
+    """
 
-    def embed(self, text: str) -> list[float]:
-        vec = [0.0] * DIM
-        counts: dict[str, int] = {}
-        for token in _TOKEN.findall(text.lower()):
-            counts[token] = counts.get(token, 0) + 1
-        for token, count in counts.items():
-            digest = hashlib.sha256(token.encode()).digest()
-            index = int.from_bytes(digest[:4], "big") % DIM
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vec[index] += sign * (1.0 + math.log(count))
-        norm = math.sqrt(sum(v * v for v in vec))
-        if norm == 0.0:
-            return vec
-        return [v / norm for v in vec]
+    def __init__(self, model_name: str, dim: int, cache_dir: str, batch_size: int) -> None:
+        self.name = model_name
+        self.dim = dim
+        self._cache_dir = cache_dir
+        self._batch_size = batch_size
+        self._model = None
+        self._lock = threading.Lock()
+
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is not None:  # another thread won the race
+                return self._model
+            from fastembed import TextEmbedding
+
+            cache_path = Path(self._cache_dir)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            _log.info("embedding_model_loading", model=self.name, cache_dir=str(cache_path))
+            model = TextEmbedding(model_name=self.name, cache_dir=str(cache_path))
+
+            # Fail loudly at load time if the model's width disagrees with configuration.
+            # Discovering this at INSERT time instead would surface as an opaque pgvector
+            # dimension error with no indication of which knob is wrong.
+            probe = len(next(iter(model.embed(["dimension probe"]))))
+            if probe != self.dim:
+                raise RuntimeError(
+                    f"embedding model {self.name} produces {probe}-dim vectors but "
+                    f"EMBEDDING_DIM is {self.dim}. Update EMBEDDING_DIM and migrate the "
+                    f"pgvector columns to match — they cannot differ."
+                )
+            self._model = model
+            _log.info("embedding_model_ready", model=self.name, dim=self.dim)
+            return model
+
+    def _embed_passages_blocking(self, texts: list[str]) -> list[list[float]]:
+        model = self._get_model()
+        return [v.tolist() for v in model.embed(texts, batch_size=self._batch_size)]
+
+    def _embed_query_blocking(self, text: str) -> list[float]:
+        model = self._get_model()
+        # query_embed applies BGE's retrieval instruction prefix; embed() does not.
+        return next(iter(model.query_embed([text]))).tolist()
+
+    async def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        return await anyio.to_thread.run_sync(self._embed_passages_blocking, texts)
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await anyio.to_thread.run_sync(self._embed_query_blocking, text)
 
 
+@lru_cache
 def get_embedder() -> Embedder:
-    """The configured embedder (only the hashing embedder ships in MVP)."""
-    return HashingEmbedder()
+    """The configured embedder (process-wide; the model is loaded at most once)."""
+    settings = get_settings()
+    return FastEmbedEmbedder(
+        model_name=settings.embedding_model,
+        dim=settings.embedding_dim,
+        cache_dir=settings.embedding_cache_dir,
+        batch_size=settings.embedding_batch_size,
+    )
