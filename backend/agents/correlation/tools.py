@@ -131,13 +131,18 @@ READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         server="prometheus",
         tool="list_alerts",
-        description="Currently firing Prometheus alerts across the platform.",
+        description=(
+            "Currently firing Prometheus alerts for the application namespace. Platform and "
+            "control-plane alerts are excluded — they describe the cluster, not this service."
+        ),
         when_to_use=(
             "To see whether this incident is isolated or one symptom of a broader failure — "
             "several services alerting together points away from a single-service cause."
         ),
         evidence_type=EvidenceType.metric,
-        args={},
+        args={
+            "namespace": "string, optional — defaults to the application namespace",
+        },
     ),
     ToolSpec(
         server="github",

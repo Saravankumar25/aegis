@@ -188,6 +188,12 @@ class Settings(BaseSettings):
     dedup_window_seconds: int = Field(default=300)
     rca_ensemble_passes: int = Field(default=3)
     incident_token_budget: int = Field(default=200_000)
+    # Per-step human-readable explanations (ESD §5). One extra, tightly capped call per
+    # reasoning agent — worth it because the alternative is an operator reading raw prompts
+    # to decide whether to trust a conclusion. Switchable because it is a reading aid, not
+    # part of the investigation: turning it off must change what is *shown*, never what is
+    # *decided*.
+    explanations_enabled: bool = Field(default=True)
     deploy_lookback_hours: float = Field(default=2.0, description="FR-2.2 change window.")
     rca_agreement_threshold: float = Field(
         default=0.6, description="Below this, the hypothesis is flagged low-confidence."

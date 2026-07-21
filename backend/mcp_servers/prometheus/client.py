@@ -96,7 +96,22 @@ class PrometheusClient:
             raise MalformedResponseError(f"unexpected range query shape: {exc}") from exc
         return result, attempts
 
-    async def list_alerts(self) -> tuple[list[AlertSummary], int]:
+    async def list_alerts(self, namespace: str | None = None) -> tuple[list[AlertSummary], int]:
+        """Firing alerts, scoped to a namespace unless explicitly asked for everything.
+
+        Unscoped, this returns every alert in the cluster — including the monitoring stack's
+        own control-plane alerts. That is not a hypothetical problem: `etcdMembersDown` from
+        `kube-system` was repeatedly handed to RCA as evidence for a `checkout-service` error
+        spike, and the model twice built its hypothesis around a control-plane failure that
+        had nothing to do with the incident. The Observer rejected both, so nothing wrong was
+        published, but two full investigations were spent on a distractor supplied by the
+        evidence layer.
+
+        Alerts carrying no `namespace` label are platform-level and are excluded when a scope
+        is given, for the same reason. Passing ``namespace=None`` still returns everything,
+        because a genuine cluster-wide investigation needs it — the default is scoped, the
+        capability remains.
+        """
         data, attempts = await self._get_data("/api/v1/alerts", "list_alerts")
         try:
             alerts = [
@@ -109,6 +124,7 @@ class PrometheusClient:
                     value=a.get("value"),
                 )
                 for a in data.get("alerts", [])
+                if namespace is None or a.get("labels", {}).get("namespace") == namespace
             ]
         except (KeyError, TypeError, AttributeError, ValidationError) as exc:
             raise MalformedResponseError(f"unexpected alerts shape: {exc}") from exc

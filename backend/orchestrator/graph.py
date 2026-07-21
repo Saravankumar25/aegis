@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from agents.communication.writer import post_update
 from agents.correlation.planner import gather
 from agents.evidence import EvidenceStore
+from agents.explain import explain_step
 from agents.observer.critic import critique
 from agents.observer.validator import review
 from agents.rca.engine import RCAResult, run_rca
@@ -83,9 +84,15 @@ def build_graph(services: InvestigationServices):
         ensemble_pass: int | None = None,
         prompt_ref: str | None = None,
         citations: list[dict] | None = None,
+        explanation: dict | None = None,
         event: str = "agent_step",
     ) -> None:
         """The single side-effect point: step + message + citations + SSE, one transaction."""
+        if explanation is not None:
+            # Folded into the same step rather than written as a separate row: one agent
+            # execution is one thing a human reads, and splitting it would make the UI join
+            # two records to render one card.
+            structured = {**(structured or {}), "explanation": explanation}
         if prompt_ref:
             # Folded into the jsonb rather than given its own column: it stays queryable
             # (`structured_output->>'prompt_ref'`) and every step already carries a
@@ -128,6 +135,38 @@ def build_graph(services: InvestigationServices):
             )
             await session.commit()
 
+    async def _explain(
+        state: InvestigationState,
+        agent: str,
+        *,
+        inputs: str,
+        output: str,
+        evidence: list[str] | None = None,
+        tools_used: list[str] | None = None,
+        retrieved_docs: list[str] | None = None,
+    ) -> dict | None:
+        """Produce the human-readable account of a step, or None.
+
+        Returns None rather than raising on every failure path, and is called *after* the
+        agent's real work: an investigation that cannot explain itself still investigates.
+        """
+        if not get_settings().explanations_enabled:
+            return None
+        outcome = await explain_step(
+            services.provider,
+            agent=agent,
+            title=state["title"],
+            service=state["service_name"],
+            inputs=inputs,
+            evidence=evidence,
+            tools_used=tools_used,
+            retrieved_docs=retrieved_docs,
+            output=output,
+        )
+        if outcome.explanation is None:
+            return None
+        return outcome.explanation.model_dump(mode="json")
+
     @traced("agent:triage", run_type="chain")
     async def triage(state: InvestigationState) -> InvestigationState:
         outcome = await assess(
@@ -159,6 +198,16 @@ def build_graph(services: InvestigationServices):
             tokens=outcome.tokens_used,
             cost=outcome.cost_usd,
             prompt_ref=outcome.prompt_ref,
+            explanation=await _explain(
+                state,
+                "triage",
+                inputs=(
+                    f"Alert '{state['title']}' on {state['service_name']}; "
+                    f"kind={state.get('alert_kind')}, value={state.get('alert_value')}; "
+                    f"rule-based floor {outcome.floor_severity}"
+                ),
+                output=message,
+            ),
         )
         # FR-6.1: first plain-English update within 2 minutes of incident creation.
         async with services.sessionmaker() as session:
@@ -208,6 +257,14 @@ def build_graph(services: InvestigationServices):
             tokens=outcome.tokens_used,
             cost=outcome.cost_usd,
             prompt_ref=outcome.prompt_refs[0] if outcome.prompt_refs else None,
+            explanation=await _explain(
+                state,
+                "correlation",
+                inputs=f"Incident '{state['title']}' on {state['service_name']}; {plan_note}",
+                evidence=[f"{i.id} ({i.source}): {i.summary[:200]}" for i in outcome.store.items],
+                tools_used=sorted({i.source for i in outcome.store.items}),
+                output=message,
+            ),
         )
         return {
             **state,
@@ -308,6 +365,22 @@ def build_graph(services: InvestigationServices):
             tokens=result.tokens_used,
             cost=result.cost_usd,
             citations=citations,
+            explanation=await _explain(
+                state,
+                "rca",
+                inputs=(
+                    f"Correlated evidence for {state['service_name']}; "
+                    f"{result.passes_succeeded} of {result.passes_requested} ensemble passes "
+                    f"succeeded; agreement {result.agreement_score}"
+                ),
+                evidence=[f"{c['evidence_ref']}: {c.get('snippet', '')[:200]}" for c in citations],
+                retrieved_docs=[
+                    line[:200]
+                    for line in (state.get("runbook_context") or "").split("\n---\n")
+                    if line.strip()
+                ],
+                output=message,
+            ),
             event="hypothesis",
         )
         return {
@@ -367,6 +440,12 @@ def build_graph(services: InvestigationServices):
             tokens=critique_outcome.tokens_used if critique_outcome else None,
             cost=critique_outcome.cost_usd if critique_outcome else None,
             prompt_ref=critique_outcome.prompt_ref if critique_outcome else None,
+            explanation=await _explain(
+                state,
+                "observer",
+                inputs="RCA hypothesis with its claims and cited evidence",
+                output=message,
+            ),
             event="observer_verdict",
         )
         return {
@@ -628,6 +707,15 @@ def build_graph(services: InvestigationServices):
             tokens=decision.tokens_used,
             cost=decision.cost_usd,
             prompt_ref=decision.prompt_ref,
+            explanation=await _explain(
+                state,
+                "resolution",
+                inputs=(
+                    f"Validated root cause '{result.root_cause_category}' on "
+                    f"{state['service_name']}; catalogued actions available"
+                ),
+                output=message,
+            ),
             event="resolution",
         )
         return {**state, "completed_steps": [*state.get("completed_steps", []), "resolution"]}

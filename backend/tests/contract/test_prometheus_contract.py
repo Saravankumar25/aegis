@@ -48,14 +48,44 @@ async def test_query_range_metrics_parses_matrix(load_fixture, mock_client):
     assert series.values[-1] == (1784023200.0, "670")
 
 
-async def test_list_alerts_parses_firing_alert(load_fixture, mock_client):
-    client = PrometheusClient(
+def _alerts_client(load_fixture, mock_client) -> PrometheusClient:
+    return PrometheusClient(
         http=mock_client(_handler_for({"/api/v1/alerts": load_fixture("prometheus/alerts.json")}))
     )
-    alerts, _ = await client.list_alerts()
-    (alert,) = alerts
-    assert alert.name == "HighErrorRate" and alert.state == "firing"
-    assert alert.labels["service"] == "checkout-service"
+
+
+async def test_list_alerts_parses_firing_alert(load_fixture, mock_client):
+    alerts, _ = await _alerts_client(load_fixture, mock_client).list_alerts()
+    by_name = {a.name: a for a in alerts}
+    assert by_name["HighErrorRate"].state == "firing"
+    assert by_name["HighErrorRate"].labels["service"] == "checkout-service"
+
+
+async def test_unscoped_list_returns_platform_alerts_too(load_fixture, mock_client):
+    """The capability is preserved — a cluster-wide investigation needs these."""
+    alerts, _ = await _alerts_client(load_fixture, mock_client).list_alerts()
+    assert {"HighErrorRate", "etcdMembersDown", "Watchdog"} == {a.name for a in alerts}
+
+
+async def test_namespace_scope_excludes_other_failure_domains(load_fixture, mock_client):
+    """Regression: `etcdMembersDown` from kube-system was handed to RCA as evidence for a
+    checkout-service error spike, and the model twice built its hypothesis around a
+    control-plane failure unrelated to the incident."""
+    alerts, _ = await _alerts_client(load_fixture, mock_client).list_alerts(namespace="meridian")
+    assert [a.name for a in alerts] == ["HighErrorRate"]
+
+
+async def test_namespace_scope_excludes_alerts_with_no_namespace(load_fixture, mock_client):
+    """`Watchdog` and most control-plane alerts carry no namespace label at all; they
+    describe the platform, so they are not evidence about a workload."""
+    alerts, _ = await _alerts_client(load_fixture, mock_client).list_alerts(namespace="meridian")
+    assert all(a.name != "Watchdog" for a in alerts)
+
+
+async def test_scope_that_matches_nothing_returns_empty_not_everything(load_fixture, mock_client):
+    """A filter that silently falls back to unfiltered is worse than no filter."""
+    alerts, _ = await _alerts_client(load_fixture, mock_client).list_alerts(namespace="nonexistent")
+    assert alerts == []
 
 
 async def test_in_body_query_error_becomes_bad_request_envelope(mock_client):

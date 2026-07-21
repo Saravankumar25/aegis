@@ -82,20 +82,31 @@ _UPSTREAM = {
 }
 
 
+# The client-side timeout a caller would actually be configured with. Emitted instead of the
+# simulated request latency, which produced "timed out after 41ms" — internally incoherent,
+# because 41ms is not a timeout. Aegis's Observer caught exactly this during end-to-end
+# validation and rejected an otherwise-correct hypothesis on the grounds that the durations
+# contradicted the upstream-latency theory. It was right: the evidence was the problem.
+UPSTREAM_TIMEOUT_MS = int(os.environ.get("UPSTREAM_TIMEOUT_MS", "3000"))
+
+
 def _log_error(endpoint: str, request_id: str, latency: float) -> None:
     """Emit an application error log resembling a real framework's output."""
     upstream = _UPSTREAM.get(SERVICE_NAME)
     if upstream:
+        # Jittered around the configured threshold, the way real timeouts cluster.
+        waited = UPSTREAM_TIMEOUT_MS + random.randint(0, 400)
         log.error(
             "request_id=%s %s %s -> 500 upstream=%s "
             "error=UpstreamTimeout: connection to %s timed out after %dms "
-            "(pool exhausted, 0 idle connections)",
+            "(pool exhausted, 0 idle connections, wait_timeout=%dms)",
             request_id,
             "POST",
             endpoint,
             upstream,
             upstream,
-            int(latency * 1000),
+            waited,
+            UPSTREAM_TIMEOUT_MS,
         )
     else:
         log.error(

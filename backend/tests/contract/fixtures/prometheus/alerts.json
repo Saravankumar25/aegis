@@ -6,6 +6,7 @@
         "labels": {
           "alertname": "HighErrorRate",
           "service": "checkout-service",
+          "namespace": "meridian",
           "severity": "critical"
         },
         "annotations": {
@@ -14,6 +15,32 @@
         "state": "firing",
         "activeAt": "2026-07-21T09:10:00Z",
         "value": "6.7e-01"
+      },
+      {
+        "labels": {
+          "alertname": "etcdMembersDown",
+          "job": "kube-etcd",
+          "namespace": "kube-system",
+          "severity": "critical"
+        },
+        "annotations": {
+          "summary": "etcd cluster members are down"
+        },
+        "state": "firing",
+        "activeAt": "2026-07-21T08:00:00Z",
+        "value": "1"
+      },
+      {
+        "labels": {
+          "alertname": "Watchdog",
+          "severity": "none"
+        },
+        "annotations": {
+          "summary": "always-firing alert to verify the alerting pipeline"
+        },
+        "state": "firing",
+        "activeAt": "2026-07-21T07:00:00Z",
+        "value": "1"
       }
     ]
   }

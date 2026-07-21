@@ -11,6 +11,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from core.config import get_settings
 from core.logging import configure_logging
 from mcp_servers.common import ToolResult, guarded
 from mcp_servers.prometheus.client import SOURCE, PrometheusClient
@@ -64,11 +65,23 @@ async def query_range_metrics(
 
 
 @app.tool()
-async def list_alerts() -> dict[str, Any]:
-    """List currently active (firing/pending) Prometheus alerts."""
+async def list_alerts(namespace: str | None = None, all_namespaces: bool = False) -> dict[str, Any]:
+    """List currently active (firing/pending) Prometheus alerts.
+
+    Scoped to the application namespace by default. The safe scope is the default and the
+    broad one is explicit, because the caller that omits the argument is a model choosing
+    tools: an unscoped default silently fed `etcdMembersDown` from `kube-system` into a
+    `checkout-service` investigation, and RCA twice built its hypothesis around a
+    control-plane failure unrelated to the incident.
+
+    Set ``all_namespaces`` for a genuine cluster-wide investigation.
+    """
+    # `k8s_namespace` is the namespace the monitored application runs in; it is the same
+    # scope whether it is reached through the k8s API or through Prometheus labels.
+    scope = None if all_namespaces else (namespace or get_settings().k8s_namespace)
 
     async def fetch() -> ToolResult:
-        alerts, attempts = await _get_client().list_alerts()
+        alerts, attempts = await _get_client().list_alerts(namespace=scope)
         return ToolResult(
             ok=True,
             source=SOURCE,

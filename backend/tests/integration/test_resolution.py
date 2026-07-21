@@ -44,7 +44,6 @@ def _decision(action_type: str, **parameters):
     )
 
 
-
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 

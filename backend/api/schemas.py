@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from db.enums import AgentMessageType, AlertSource, IncidentState, Severity
 
@@ -76,6 +76,26 @@ class CitationOut(BaseModel):
     validated_by_observer: bool
 
 
+class AgentExplanationOut(BaseModel):
+    """The agent's own account of a step, rendered directly by the incident view.
+
+    A typed field rather than leaving the UI to reach into `structured_output`: these names
+    are a frontend contract, so a renamed field should break the API schema loudly instead
+    of silently rendering an empty card.
+    """
+
+    headline: str = ""
+    what_it_received: str = ""
+    evidence_collected: list[str] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+    documents_retrieved: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+    alternatives_considered: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    uncertainty: str = ""
+    recommended_next: list[str] = Field(default_factory=list)
+
+
 class AgentStepOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -92,6 +112,26 @@ class AgentStepOut(BaseModel):
     latency_ms: int | None
     created_at: datetime.datetime
     citations: list[CitationOut] = Field(default_factory=list)
+    explanation: AgentExplanationOut | None = None
+
+    @model_validator(mode="after")
+    def _lift_explanation(self) -> AgentStepOut:
+        """Surface the explanation stored inside `structured_output` as a typed field.
+
+        Lifted here rather than given its own column: it is written by the same
+        single-transaction step-persistence path, and a column would need a migration per
+        field the explanation grows.
+        """
+        if self.explanation is None and isinstance(self.structured_output, dict):
+            raw = self.structured_output.get("explanation")
+            if isinstance(raw, dict):
+                # An explanation that fails validation is dropped rather than raised: it is
+                # a reading aid, and a malformed one must not make the incident unreadable.
+                try:
+                    self.explanation = AgentExplanationOut.model_validate(raw)
+                except ValidationError:
+                    self.explanation = None
+        return self
 
 
 class TransitionOut(BaseModel):

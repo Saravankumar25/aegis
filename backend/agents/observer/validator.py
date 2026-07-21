@@ -81,6 +81,7 @@ CATEGORY_SUPPORT: dict[str, dict] = {
     "resource_exhaustion": {
         "requires_type": None,
         "markers": [
+            # Compute exhaustion.
             r"oomkill",
             r"out of memory",
             r"memory limit",
@@ -90,8 +91,26 @@ CATEGORY_SUPPORT: dict[str, dict] = {
             r"\brestarting\b",
             r"\bevicted\b",
             r"cpu throttl",
+            # Handle exhaustion. Added after a real rejection: the evidence read
+            # "pool exhausted, 0 idle connections" and RCA correctly called it resource
+            # exhaustion, but the marker list only recognised *memory* exhaustion, so a
+            # correct hypothesis was rejected for citing the wrong kind of resource. These
+            # stay high-precision — each names a specific exhausted resource, so the rule
+            # still refuses a hypothesis backed by nothing but a generic error line.
+            r"pool\s+(is\s+)?exhaust",
+            r"connection pool",
+            r"\b0 idle connections?\b",
+            r"no (idle|available) connections?",
+            r"too many open files",
+            r"file descriptors?\s+(exhaust|limit)",
+            r"thread pool\s+(exhaust|full)",
+            r"queue (is )?full",
+            r"\bbackpressure\b",
         ],
-        "why": "an OOM/crash/restart signal must be cited before blaming resources",
+        "why": (
+            "a signal naming an exhausted resource (memory, CPU, connections, handles) "
+            "must be cited before blaming resources"
+        ),
     },
     "latency_degradation": {
         "requires_type": None,

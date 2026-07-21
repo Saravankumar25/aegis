@@ -73,6 +73,47 @@ def test_resource_exhaustion_needs_an_oom_or_crash_signal():
     assert check_category_support("resource_exhaustion", claims, crashing)[0] is True
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "UpstreamTimeout: connection to payment timed out (pool exhausted, 0 idle connections)",
+        "HikariPool-1 - Connection pool is exhausted, no available connections",
+        "socket accept failed: too many open files",
+        "worker thread pool exhausted; queue is full",
+    ],
+)
+def test_handle_exhaustion_counts_as_resource_exhaustion(evidence):
+    """Regression: a correct hypothesis was rejected because the taxonomy only knew memory.
+
+    Observed live — evidence read "pool exhausted, 0 idle connections", RCA correctly called
+    it resource exhaustion, and the Observer rejected it for citing no OOM/crash signal. A
+    finite resource being exhausted is the category regardless of which resource it was.
+    """
+    store = _store((EvidenceType.log, evidence))
+    claims = [{"claim": "the service exhausted a finite resource", "evidence_id": "E1"}]
+    supported, reason = check_category_support("resource_exhaustion", claims, store)
+    assert supported is True, reason
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "pod checkout-abc phase=Running ready=1/1 restarts=0",
+        "GET /health 200 OK",
+        "request completed in 12ms",
+    ],
+)
+def test_broadened_markers_still_reject_evidence_naming_no_exhausted_resource(evidence):
+    """The widening must not become 'anything matches'.
+
+    Each added marker names a specific exhausted resource; healthy or generic evidence must
+    still fail, or the guard stops being a guard.
+    """
+    store = _store((EvidenceType.log, evidence))
+    claims = [{"claim": "resources ran out", "evidence_id": "E1"}]
+    assert check_category_support("resource_exhaustion", claims, store)[0] is False
+
+
 def test_citing_uncited_but_present_evidence_is_still_rejected():
     """Deploy evidence exists but the claims don't cite it — still unsupported."""
     store = _store(
