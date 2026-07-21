@@ -9,14 +9,14 @@ clearly separated from live evidence so citations can only point at real evidenc
 
 from __future__ import annotations
 
-import json
-
 from pydantic import BaseModel, Field, ValidationError
 
 from agents.evidence import EvidenceStore
 from agents.rca.scoring import RCAPass, agreement_score, consensus_pass
 from core.config import get_settings
+from db.enums import EvidenceType
 from providers.base import LLMProvider, LLMResult
+from providers.parsing import parse_json_object
 from redaction.pipeline import EVIDENCE_RULES
 
 
@@ -30,6 +30,10 @@ class RCAResult(BaseModel):
     low_confidence: bool
     claims: list[dict] = Field(default_factory=list)
     passes: list[RCAPass] = Field(default_factory=list)
+    passes_requested: int = 0
+    passes_succeeded: int = 0
+    ensemble_degraded: bool = False
+    models_used: list[str] = Field(default_factory=list)
     tokens_used: int = 0
     cost_usd: float = 0.0
     budget_degraded: bool = False
@@ -44,22 +48,63 @@ _SCHEMA_HINT = (
 
 def build_prompt(service: str, title: str, store: EvidenceStore, runbook_context: str) -> str:
     gaps = "\n".join(f"- {g}" for g in store.gaps) or "- none"
+    # A category whose only possible evidence source was unavailable cannot be
+    # asserted. Spelling this out in the prompt stops the model reaching for the
+    # most narratively satisfying cause (observed live: it blamed "a recent
+    # deployment" while the deploy source was down and no deploy evidence existed).
+    has_change_evidence = any(i.type == EvidenceType.diff for i in store.items)
+    unassertable = (
+        ""
+        if has_change_evidence
+        else (
+            "\nIMPORTANT: no deploy/commit evidence was gathered, so you may NOT claim a "
+            "deploy or code change caused this. If the evidence does not identify a cause, "
+            'answer "unknown" — that is a correct and useful answer, not a failure.\n'
+        )
+    )
     return (
         f"{EVIDENCE_RULES}\n\n"
         f"You are the RCA agent investigating: {title} (service: {service}).\n"
-        f"Unavailable evidence sources (documented gaps):\n{gaps}\n\n"
+        f"Unavailable evidence sources (documented gaps):\n{gaps}\n"
+        f"{unassertable}\n"
         f"Evidence:\n{store.prompt_block()}\n\n"
         f"Relevant runbook excerpts (background knowledge, NOT citable evidence):\n"
         f"{runbook_context or '(none found)'}\n\n"
         f"Respond with JSON only, exactly this schema: {_SCHEMA_HINT}\n"
-        f"Every claim MUST cite an evidence id that appears above."
+        f"Every claim MUST cite an evidence id that appears above, and the cited "
+        f"evidence must actually support the claim. Do not infer a cause the evidence "
+        f"does not show."
     )
 
 
 def _parse_pass(raw: str) -> RCAPass | None:
+    """Parse one pass's JSON, tolerating the formatting real models actually emit.
+
+    ``parse_json_object`` strips markdown fences and digs the object out of
+    surrounding prose — both of which happen even with JSON mode enabled. A pass
+    that still doesn't validate returns None and the caller runs its retry path.
+    """
+    payload = parse_json_object(raw)
+    if payload is None:
+        return None
+    # Models occasionally emit confidence as a percentage ("85") or a string.
+    confidence = payload.get("confidence")
+    if isinstance(confidence, str):
+        try:
+            confidence = float(confidence.strip().rstrip("%"))
+        except ValueError:
+            confidence = None
+    if isinstance(confidence, int | float) and confidence > 1:
+        confidence = confidence / 100.0
+    payload["confidence"] = confidence if confidence is not None else 0.5
+    # Drop malformed claim entries rather than failing the whole pass.
+    claims = payload.get("claims")
+    payload["claims"] = (
+        [c for c in claims if isinstance(c, dict)] if isinstance(claims, list) else []
+    )
     try:
-        return RCAPass.model_validate(json.loads(raw))
-    except (json.JSONDecodeError, ValidationError):
+        return RCAPass.model_validate(payload)
+    except ValidationError:
         return None
 
 
@@ -103,6 +148,8 @@ async def run_rca(
         if parsed is not None:
             passes.append(parsed)
 
+    models_used = sorted({r.model for r in results})
+
     if not passes:
         return RCAResult(
             hypothesis="RCA could not produce a valid hypothesis from the available evidence.",
@@ -110,6 +157,10 @@ async def run_rca(
             confidence=0.0,
             agreement_score=0.0,
             low_confidence=True,
+            passes_requested=settings.rca_ensemble_passes,
+            passes_succeeded=0,
+            ensemble_degraded=True,
+            models_used=models_used,
             tokens_used=sum(r.tokens_used for r in results),
             cost_usd=sum(r.cost_usd for r in results),
             budget_degraded=budget_degraded,
@@ -117,14 +168,24 @@ async def run_rca(
 
     score = agreement_score(passes)
     best = consensus_pass(passes)
+    # A single surviving pass "agrees with itself" — that is arithmetic, not
+    # corroboration. Reporting 1.00 there would present one opinion as unanimity,
+    # so a degraded ensemble is always flagged low-confidence regardless of score
+    # (PRD 10A: surface disagreement, never manufacture certainty).
+    ensemble_degraded = len(passes) < min(2, settings.rca_ensemble_passes)
+    low_confidence = score < settings.rca_agreement_threshold or ensemble_degraded
     return RCAResult(
         hypothesis=best.hypothesis,
         root_cause_category=best.root_cause_category,
         confidence=best.confidence,
         agreement_score=score,
-        low_confidence=score < settings.rca_agreement_threshold,
+        low_confidence=low_confidence,
         claims=best.claims,
         passes=passes,
+        passes_requested=settings.rca_ensemble_passes,
+        passes_succeeded=len(passes),
+        ensemble_degraded=ensemble_degraded,
+        models_used=models_used,
         tokens_used=sum(r.tokens_used for r in results),
         cost_usd=sum(r.cost_usd for r in results),
         budget_degraded=budget_degraded,

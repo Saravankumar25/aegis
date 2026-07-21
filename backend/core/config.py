@@ -35,8 +35,35 @@ class Settings(BaseSettings):
     jwt_access_ttl_seconds: int = Field(default=900)
     jwt_refresh_ttl_seconds: int = Field(default=604800)
 
-    # --- LLM provider (Strategy pattern, ESD §20). Default deterministic stub, no key needed. ---
-    llm_provider: str = Field(default="stub")
+    # --- LLM provider (Strategy pattern, ESD §20). Real models only — there is no
+    # stub/offline provider. Keys come from env, never committed (CLAUDE.md §12). ---
+    llm_provider: str = Field(default="openrouter")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    # Comma-separated; the provider rotates across them when one is rate-limited.
+    openrouter_api_keys: str = Field(default="")
+    google_api_keys: str = Field(default="")
+    # Per-agent model assignment (ESD §20: right-size capability to task difficulty).
+    # RCA does the actual reasoning and must emit strict JSON; the others summarize.
+    llm_model_rca: str = Field(default="nvidia/nemotron-3-super-120b-a12b:free")
+    llm_model_default: str = Field(default="nvidia/nemotron-nano-9b-v2:free")
+    # Tried in order when the primary is rate-limited or unavailable upstream.
+    llm_model_fallbacks: str = Field(
+        default="nvidia/nemotron-nano-9b-v2:free,google/gemma-4-26b-a4b-it:free,openai/gpt-oss-20b:free"
+    )
+    llm_temperature: float = Field(default=0.2)
+    # Real prompts (5 evidence blocks) plus hidden reasoning tokens overrun 900 and
+    # truncate the JSON mid-object, which silently drops an entire ensemble pass.
+    llm_max_tokens: int = Field(default=2500)
+    llm_max_tokens_on_truncation: int = Field(default=4000)
+    llm_timeout_seconds: float = Field(default=90.0)
+
+    @property
+    def openrouter_key_list(self) -> list[str]:
+        return [k.strip() for k in self.openrouter_api_keys.split(",") if k.strip()]
+
+    @property
+    def llm_fallback_list(self) -> list[str]:
+        return [m.strip() for m in self.llm_model_fallbacks.split(",") if m.strip()]
 
     # --- Incident tuning (PRD FR-1.2, FR-3.1; ESD §15) ---
     dedup_window_seconds: int = Field(default=300)

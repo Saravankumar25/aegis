@@ -1,9 +1,0 @@
-{
-  "id": "PD-1002",
-  "service_name": "payment-service",
-  "title": "PagerDuty: payment-service pods crash-looping",
-  "kind": "pod_crash",
-  "urgency": "high",
-  "created_at": "2026-07-21T09:40:00Z",
-  "notes": "Replayed fixture incident for demo/eval use."
-}

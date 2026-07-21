@@ -219,7 +219,7 @@ def build_graph(services: InvestigationServices):
     async def observer(state: InvestigationState) -> InvestigationState:
         store: EvidenceStore = state["evidence_store"]
         result: RCAResult = state["rca_result"]
-        verdict = review(result.claims, store)
+        verdict = review(result.claims, store, root_cause_category=result.root_cause_category)
         message = (
             f"Observer: {'approved' if verdict.approved else 'REJECTED'} — {verdict.notes} "
             f"(flagged evidence: {[f['evidence_id'] for f in verdict.flagged_evidence] or 'none'})"

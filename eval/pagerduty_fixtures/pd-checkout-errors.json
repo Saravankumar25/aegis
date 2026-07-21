@@ -1,9 +1,0 @@
-{
-  "id": "PD-1001",
-  "service_name": "checkout-service",
-  "title": "PagerDuty: checkout-service error budget burn",
-  "kind": "error_rate",
-  "urgency": "high",
-  "created_at": "2026-07-21T09:05:00Z",
-  "notes": "Replayed fixture incident for demo/eval use."
-}

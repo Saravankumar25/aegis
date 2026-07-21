@@ -1,1 +1,1 @@
-"""LLM provider abstraction (Strategy pattern). Default deterministic stub (ESD §20)."""
+"""LLM provider abstraction (Strategy pattern, ESD §20). Real models only."""

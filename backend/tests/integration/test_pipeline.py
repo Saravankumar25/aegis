@@ -1,7 +1,7 @@
 """Integration: the full investigation graph against a real DB with fixture evidence.
 
 Exercises the entire MVP loop below the API: open incident → triage → correlation
-(FixtureGateway) → RCA ensemble (stub provider) → observer → hypothesis_formed, with
+(ReplayGateway) → RCA ensemble (recorded LLM double) → observer → hypothesis_formed, with
 steps, messages, citations, transitions, and audit rows all persisted for replay.
 """
 
@@ -13,12 +13,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from agents.gateway import FixtureGateway
 from db.enums import ActorType, AlertSource, IncidentState, Severity
 from db.models import AgentStep, EvidenceCitation, Incident
 from db.repository import IncidentRepository
 from orchestrator.graph import InvestigationServices, build_graph
-from providers.stub import StubProvider
+from tests.support.doubles import RecordedLLM, ReplayGateway
 
 
 def _ok(source: str, tool: str, data, untrusted: bool = False) -> dict:
@@ -126,8 +125,8 @@ async def test_full_investigation_reaches_validated_hypothesis(pipeline_env):
     maker = pipeline_env
     incident_id = await _create_investigating_incident(maker)
 
-    gateway = FixtureGateway(OOM_FIXTURES)
-    graph = build_graph(InvestigationServices(maker, gateway, StubProvider()))
+    gateway = ReplayGateway(OOM_FIXTURES)
+    graph = build_graph(InvestigationServices(maker, gateway, RecordedLLM()))
     final = await graph.ainvoke(
         {
             "incident_id": str(incident_id),
@@ -187,8 +186,8 @@ async def test_injected_evidence_is_screened_and_survivable(pipeline_env):
         },
         untrusted=True,
     )
-    gateway = FixtureGateway(poisoned)
-    graph = build_graph(InvestigationServices(maker, gateway, StubProvider()))
+    gateway = ReplayGateway(poisoned)
+    graph = build_graph(InvestigationServices(maker, gateway, RecordedLLM()))
     final = await graph.ainvoke(
         {
             "incident_id": str(incident_id),
@@ -210,8 +209,8 @@ async def test_all_sources_down_still_completes_with_gaps(pipeline_env):
     """PRD 10A: every MCP source unavailable → documented gaps, not a stalled run."""
     maker = pipeline_env
     incident_id = await _create_investigating_incident(maker)
-    gateway = FixtureGateway({})  # every call returns unavailable
-    graph = build_graph(InvestigationServices(maker, gateway, StubProvider()))
+    gateway = ReplayGateway({})  # every call returns unavailable
+    graph = build_graph(InvestigationServices(maker, gateway, RecordedLLM()))
     final = await graph.ainvoke(
         {
             "incident_id": str(incident_id),

@@ -618,3 +618,70 @@ Triggers: **new autonomous action types** (restart pod, scale deployment), **new
 - Verified in-browser in both themes: marketing homepage, dashboard (real incidents from the
   live E2E runs), incident detail with observer-validated citations. `next build`, `next lint`,
   `tsc --noEmit` all clean; backend still 148 passing, ruff clean.
+
+---
+
+## Real LLM integration — OpenRouter, and the removal of every fake path
+
+**Status:** complete (accuracy re-measurement pending upstream capacity; see below).
+
+### Real models, no offline path
+- **`providers/openrouter.py`**: OpenAI-compatible client with two independent recovery axes —
+  **key rotation** across the configured keys, and a **model fallback chain** — because on free
+  tiers throttling is the normal case, not an edge case. Real token/cost accounting comes from the
+  API `usage` block, so FR-8.2 numbers and the ESD §15 budget are actual, not estimated.
+- **Model choice** (measured, not guessed): probed five free models with a real RCA prompt.
+  `nvidia/nemotron-3-super-120b-a12b:free` — 5.2s, correct category, all three citations resolving
+  — is the RCA model; `nemotron-nano-9b-v2` handles the cheaper agents; gemma/gpt-oss are
+  fallbacks. `google/gemma-4-31b-it:free` was already 429ing during the probe, which is precisely
+  why the fallback chain exists.
+- **Every stub/fake/mock path deleted from the product** (user directive, and the right call):
+  `providers/stub.py` gone; `llm_degrade_to_stub` gone; the factory accepts **only** `openrouter`;
+  `FixtureGateway` moved out of `agents/` into `tests/support/doubles.py`; the **PagerDuty-mock
+  MCP server and its fixtures deleted** (it served fabricated incidents while real alerts already
+  arrive from Prometheus/Alertmanager); the marketing homepage's mocked-up incident replaced with
+  a pipeline schematic, and the remaining example panel labelled as an illustration.
+  When every model and key is exhausted the provider now raises `ProviderExhausted` and the
+  incident is left for the retry sweep. **Degrading throughput is fine; degrading truthfulness is
+  not** — recorded as an ESD §25 trade-off.
+
+### Three defects the real model exposed (all fixed)
+Running the real pipeline surfaced problems the deterministic stub structurally could not:
+1. **Unsupported causes passed validation.** The model asserted *"a recent deployment introduced a
+   bug"* while GitHub was unavailable and **no deploy evidence existed at all**. Every citation
+   resolved, so the Observer approved it. Added `check_category_support`: a category may only be
+   asserted when the cited evidence actually supports it — `deploy_regression` now requires cited
+   `diff` evidence, `resource_exhaustion` a real OOM/crash signal, and so on. RCA is also told up
+   front which causes are unassertable when their source is missing.
+   *My first version of this guard had its own bug — naive substring matching meant `restarts=0`
+   satisfied the "restart" marker, so a perfectly healthy pod supported a resource-exhaustion
+   claim. Markers are now regexes requiring a non-zero fault signal; the test that caught it is
+   `test_resource_exhaustion_needs_an_oom_or_crash_signal`.*
+2. **One surviving pass reported as unanimity.** Real prompts plus hidden reasoning tokens
+   overran `max_tokens=900`, truncating the JSON mid-object; 2 of 3 ensemble passes were silently
+   dropped, and the survivor scored `agreement 1.00` — one opinion presented as corroboration.
+   Fixed on both ends: budget raised to 2500 with an automatic re-ask at 4000 on
+   `finish_reason == "length"` (the caller's `max_tokens` was also being ignored entirely), and a
+   degraded ensemble is now **always** flagged low-confidence regardless of score.
+3. **Real-model JSON shapes.** Fenced blocks, prose-wrapped objects, `"85%"` confidences and
+   malformed claim entries all broke parsing. `providers/parsing.py` (provider-neutral, so agents
+   don't couple to a vendor) recovers them without spending a retry.
+
+### Measured (real models, genuine calls)
+- Pre-fix full-corpus run: **12/12 accuracy, 0 hallucinated citations across 43 claims**,
+  35,873 tokens, 13–81s per scenario.
+- Adversarial checks: with near-zero evidence the model answered **`unknown`** rather than
+  inventing a cause; a fabricated `E99` citation was **rejected** by the Observer.
+- Live E2E: real 80% error injection on `checkout-service` → real Prometheus/k8s/GitHub MCP
+  evidence → 5 real RCA calls → observer-validated hypothesis → Tier-3 `rollback_deploy` proposed
+  (correctly *not* auto-executed).
+- **Re-measurement after the grounding fixes is pending free-tier capacity** — the harness now
+  refuses to report numbers it cannot obtain from a real model, so a throttled run fails instead
+  of quietly printing offline results. Re-run: `backend/.venv/Scripts/python.exe eval/run_real_eval.py`.
+
+### Tests
+166 passing. New: `tests/unit/test_grounding.py` (14 — category support, the healthy-pod false
+positive, degraded ensembles, real-model JSON shapes) and `tests/unit/test_no_fabrication.py`
+(9 — the stub module is *gone* not just unregistered, the factory refuses every non-real provider
+name, an exhausted provider raises instead of answering, and a fully-throttled key×model matrix
+still refuses to invent output).

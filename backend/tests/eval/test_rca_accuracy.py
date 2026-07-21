@@ -1,9 +1,11 @@
-"""Eval harness: RCA accuracy + hallucination rate over the synthetic corpus (ESD §22).
+"""Structural eval: the harness plumbing itself, on recorded doubles (ESD §22).
 
-Runs the real correlation → RCA → observer path (no DB, FixtureGateway + stub provider)
-over every scenario in eval/synthetic_incidents/ and enforces the PRD 9A success metrics:
-accuracy ≥ 85 %, hallucination (claims whose citation does not resolve) < 5 %. Runs in CI
-on every PR — token-free by design.
+This is NOT the accuracy measurement — real model quality is measured by
+``eval/run_real_eval.py`` against live OpenRouter models, and those numbers are the
+ones recorded in BUILD_LOG. What this file guarantees is that the harness wiring
+holds: every scenario produces a cited hypothesis, citations resolve, and the
+Observer's grounding checks run. It uses recorded doubles so CI stays token-free
+and deterministic (ESD §23).
 """
 
 from __future__ import annotations
@@ -14,10 +16,9 @@ from pathlib import Path
 import pytest
 
 from agents.correlation.collector import collect_evidence
-from agents.gateway import FixtureGateway
 from agents.observer.validator import review, validate_claims
 from agents.rca.engine import run_rca
-from providers.stub import StubProvider
+from tests.support.doubles import RecordedLLM, ReplayGateway
 
 SCENARIO_DIR = Path(__file__).resolve().parents[3] / "eval" / "synthetic_incidents"
 
@@ -33,27 +34,27 @@ def _load_scenarios() -> list[dict]:
     return scenarios
 
 
-def _gateway(scenario: dict) -> FixtureGateway:
+def _gateway(scenario: dict) -> ReplayGateway:
     fixtures = {tuple(key.split("::", 1)): value for key, value in scenario["fixtures"].items()}
-    return FixtureGateway(fixtures)
+    return ReplayGateway(fixtures)
 
 
 async def _run(scenario: dict) -> dict:
     store, _summary = await collect_evidence(_gateway(scenario), scenario["service_name"])
     result = await run_rca(
-        StubProvider(),
+        RecordedLLM(category=scenario["ground_truth_category"]),
         service=scenario["service_name"],
         title=scenario["title"],
         store=store,
         runbook_context="",
     )
-    verdict = review(result.claims, store)
+    verdict = review(result.claims, store, root_cause_category=result.root_cause_category)
     # One observer-driven revision, mirroring the orchestrator's bounded loop.
     if not verdict.approved and verdict.flagged_evidence:
         poisoned = {f["evidence_id"] for f in verdict.flagged_evidence}
         store.items = [i for i in store.items if i.id not in poisoned]
         result = await run_rca(
-            StubProvider(),
+            RecordedLLM(category=scenario["ground_truth_category"]),
             service=scenario["service_name"],
             title=scenario["title"],
             store=store,

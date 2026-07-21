@@ -41,53 +41,35 @@ function MarketingNav() {
   );
 }
 
-// A CSS-drawn product still. No screenshots to go stale, and it renders
-// correctly in both themes.
-function ProductStill() {
+// A schematic of the pipeline — deliberately NOT a mocked-up incident. Showing
+// invented severities, confidences and commit hashes on a marketing page would be
+// fabricated data dressed as product output, which is the exact thing this system
+// is built to refuse. This describes what each stage does; the real numbers live
+// on the dashboard, against real incidents.
+function PipelineSchematic() {
+  const stages = [
+    { agent: "Triage", does: "Classifies severity, merges duplicate alerts" },
+    { agent: "Correlation", does: "Pulls logs, metrics, events, recent deploys" },
+    { agent: "RCA", does: "Reasons in parallel, scores how much the passes agree" },
+    { agent: "Observer", does: "Rejects any claim its cited evidence doesn't support" },
+    { agent: "Resolution", does: "Acts only inside four independent safety gates" },
+  ];
   return (
-    <div className="mx-auto w-full max-w-4xl overflow-hidden rounded-2xl border border-edge bg-surface shadow-2xl shadow-black/20">
-      <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
-        <span className="h-2.5 w-2.5 rounded-full border border-edge" />
-        <span className="h-2.5 w-2.5 rounded-full border border-edge" />
-        <span className="h-2.5 w-2.5 rounded-full border border-edge" />
-        <span className="ml-3 text-[11px] text-muted">checkout-service · P1 · investigating</span>
-        <span className="ml-auto flex items-center gap-1.5 text-[11px] text-ok">
-          <span className="h-1.5 w-1.5 rounded-full bg-ok" />
-          live
-        </span>
+    <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-2xl border border-edge bg-surface">
+      <div className="border-b border-edge px-5 py-3 text-[10px] uppercase tracking-[0.16em] text-muted">
+        Alert in → cited hypothesis out
       </div>
-
-      <div className="space-y-3 p-5 text-left">
-        <div className="rounded-xl border border-edge bg-bg p-4">
-          <p className="text-[10px] uppercase tracking-widest text-muted">
-            Root-cause hypothesis
-          </p>
-          <p className="mt-1.5 text-[15px] leading-snug">
-            A recent code change regressed the service.
-          </p>
-          <p className="mt-2 text-[11px] text-muted">
-            confidence 0.87 · agreement 1.00 · 3 ensemble passes
-          </p>
-          <div className="mt-3 rounded-lg border border-edge bg-surface2 p-3 font-mono text-[10.5px] leading-relaxed text-muted">
-            <span className="text-ok">✓ observer-validated</span> · github/commit/9f1c2e3
-            <br />
-            feat: raise checkout cache TTL to 300s
-          </div>
-        </div>
-
-        {[
-          ["Triage", "checkout-service classified P1 — handing off to correlation."],
-          ["Correlation", "gathered 5 evidence items across logs, metrics and deploys."],
-          ["Observer", "approved — every claim resolves to cited evidence."],
-        ].map(([agent, line]) => (
-          <div key={agent} className="flex gap-3 rounded-xl border border-edge bg-bg px-4 py-3">
-            <span className="w-24 shrink-0 text-[10px] uppercase tracking-widest text-muted">
-              {agent}
+      <ol className="divide-y divide-edge">
+        {stages.map((stage, i) => (
+          <li key={stage.agent} className="flex items-baseline gap-4 px-5 py-4 text-left">
+            <span className="w-5 shrink-0 font-mono text-[11px] text-muted">
+              {String(i + 1).padStart(2, "0")}
             </span>
-            <span className="text-[12.5px] leading-snug text-fg/90">{line}</span>
-          </div>
+            <span className="w-28 shrink-0 text-[13px] font-medium">{stage.agent}</span>
+            <span className="text-[13px] leading-snug text-muted">{stage.does}</span>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }
@@ -146,7 +128,7 @@ export default function HomePage() {
         </div>
 
         <div className="relative mt-16 reveal sm:mt-20">
-          <ProductStill />
+          <PipelineSchematic />
         </div>
       </section>
 
@@ -222,7 +204,7 @@ export default function HomePage() {
 
         <div className="mx-auto mt-14 max-w-2xl overflow-hidden rounded-2xl border border-edge bg-bg">
           <div className="border-b border-edge px-5 py-3 text-[10px] uppercase tracking-widest text-muted">
-            Cited evidence
+            Illustration of the citation format
           </div>
           {[
             ["metric", "prom/error_rate/checkout-service", 'rate(status="500") = 3.32/s'],

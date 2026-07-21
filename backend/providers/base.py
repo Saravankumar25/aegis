@@ -37,4 +37,4 @@ class LLMProvider(ABC):
         max_tokens: int = 1024,
     ) -> LLMResult:
         """Return a completion for ``prompt``. ``agent``/``ensemble_pass`` let providers
-        vary sampling per pass (and let the deterministic stub vary its emphasis)."""
+        vary sampling or temperature per ensemble pass."""

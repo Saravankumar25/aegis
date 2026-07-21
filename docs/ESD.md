@@ -154,8 +154,7 @@ backend/
   safety/circuit_breaker/      per-service + global mass-action breaker [review fix]
   safety/kill_switch/          immediate halt across all in-flight incidents
   mcp_servers/k8s/             write verbs added: delete pod, patch deployment replicas
-  mcp_servers/slack/
-  mcp_servers/pagerduty_mock/  fixture-replay engine
+  mcp_servers/slack/            outbound status updates (FR-6)
   api/                          approval endpoints, kill switch, circuit-breaker status
 frontend/
   app/approvals/         Tier-2 approval queue
@@ -370,7 +369,7 @@ Both environments build from the same Docker images; only the target infrastruct
 | Infra metrics | OpenTelemetry + Prometheus | Industry-standard, decoupled from the AI reasoning layer |
 | Local k8s | kind | Lightweight, CI-friendly practice cluster |
 | Auth | Self-issued JWT | No third-party vendor coupling, demonstrates understanding of the mechanism |
-| LLM providers | Multi-provider (Claude free tier, Groq, local Ollama models) | Cost-managed, right-sizes model capability to task difficulty per agent |
+| LLM providers | OpenRouter (free-tier open models), key-rotated | Cost-managed and vendor-neutral: one OpenAI-compatible endpoint reaches many models, so per-agent right-sizing and rate-limit failover are config, not code. **There is no stub/offline provider** — see the trade-off row in Section 25 |
 
 ## 21. Folder/Project Structure
 
@@ -443,4 +442,6 @@ GitHub Actions pipeline: lint (ruff, eslint) → unit tests → contract tests �
 | Chaos testing | Manual failure-injection scripts | Chaos Mesh/Litmus | Matches the stated "keep it simple" constraint and limited Kubernetes familiarity; documented as a V2+ upgrade |
 | Auth | Self-issued JWT | Firebase/OAuth provider | Avoids vendor coupling in an otherwise vendor-agnostic stack; demonstrates the mechanism rather than delegating it |
 | MVP run durability | Re-run investigation from scratch on worker crash (no LangGraph Postgres checkpointer yet) | LangGraph Postgres checkpointer | MVP investigations are read-only and idempotent; agent_steps/messages/transitions already persist everything replay needs. The checkpointer becomes load-bearing (and gets added) in V1.5 when runs gain side effects |
+| Fallback when no model answers | Raise and leave the incident for the retry sweep | Degrade to a deterministic offline analysis | An offline answer is indistinguishable from a real one at the point a human decides to trust it. Degrading *throughput* is acceptable; degrading *truthfulness* is not. The system therefore ships no stub, mock, or offline provider at all |
+| Claim validation depth | Citation must resolve **and** the cited evidence must support the asserted category | Citation-resolves-only | Found live: a model asserted "a recent deployment introduced a bug" while the deploy source was unavailable and no deploy evidence existed. Every citation resolved, so citation-only validation approved it. Category support closes that hole |
 | Ensemble RCA cost | 3 concurrent reasoning passes | A single pass | Buys a real, structured agreement-score signal (Section 6.1's structured output) instead of a single unverifiable confident answer; cost is bounded by the per-incident token budget (Section 15) |

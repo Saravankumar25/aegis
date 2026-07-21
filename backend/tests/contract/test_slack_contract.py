@@ -1,10 +1,14 @@
-"""Contract tests: Slack + PagerDuty-mock MCP servers (ESD §22)."""
+"""Contract tests: the Slack MCP server (ESD §22).
+
+The PagerDuty-mock server was removed: it served fabricated incidents, and real
+alerts already arrive from Prometheus/Alertmanager. Aegis ingests real alert data
+only.
+"""
 
 from __future__ import annotations
 
 import httpx
 
-from mcp_servers.pagerduty_mock import server as pd_server
 from mcp_servers.slack.client import SlackClient
 
 
@@ -32,19 +36,3 @@ async def test_slack_posts_to_webhook(monkeypatch, mock_client):
     result, _ = await client.post_message("[Aegis] update text")
     assert result["delivered"] is True
     assert sent == [{"text": "[Aegis] update text"}]
-
-
-async def test_pagerduty_mock_replays_fixtures():
-    envelope = await pd_server.list_incidents()
-    assert envelope["ok"] is True
-    assert envelope["contains_untrusted_text"] is True
-    ids = {item["id"] for item in envelope["data"]}
-    assert {"PD-1001", "PD-1002"} <= ids
-
-    one = await pd_server.get_incident("PD-1001")
-    assert one["ok"] is True
-    assert one["data"]["service_name"] == "checkout-service"
-
-    missing = await pd_server.get_incident("PD-9999")
-    assert missing["ok"] is False
-    assert missing["error_kind"] == "not_found"

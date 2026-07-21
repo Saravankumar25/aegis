@@ -2,8 +2,9 @@
 
 ``McpGateway`` speaks the real MCP protocol over stdio to the three read-only servers,
 each running as its own subprocess with its own credential — the worker process never
-holds an infrastructure credential itself (PRD NFR-Security). ``FixtureGateway`` serves
-canned tool results for tests and the eval harness.
+holds an infrastructure credential itself (PRD NFR-Security). There is no in-app
+fake or offline gateway: evidence either comes from real infrastructure or is
+recorded as a documented gap. Tests use ``tests/support/doubles.ReplayGateway``.
 
 Every method returns the servers' uniform ``ToolResult`` dict; a dead server yields
 ``ok=false`` envelopes (their own retry/degradation logic, ESD §12) or, if the subprocess
@@ -88,24 +89,3 @@ class McpGateway:
         except Exception as exc:  # noqa: BLE001 — degrade, never stall the run (ESD §12)
             self._log.warning("mcp_call_failed", server=server, tool=tool, error=str(exc))
             return _unavailable(server, tool, str(exc))
-
-
-class FixtureGateway:
-    """Canned tool results keyed by ``(server, tool)`` for tests and the eval harness."""
-
-    def __init__(self, fixtures: dict[tuple[str, str], ToolResultDict]) -> None:
-        self._fixtures = fixtures
-        self.calls: list[tuple[str, str, dict]] = []
-
-    async def start(self) -> None:  # interface parity
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-    async def call(self, server: str, tool: str, arguments: dict | None = None) -> ToolResultDict:
-        self.calls.append((server, tool, arguments or {}))
-        result = self._fixtures.get((server, tool))
-        if result is None:
-            return _unavailable(server, tool, "no fixture configured")
-        return result
