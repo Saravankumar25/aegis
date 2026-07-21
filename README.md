@@ -42,9 +42,21 @@ pytest                          # unit + contract + fault-injection
 ruff check .
 ```
 
-The LLM layer defaults to a deterministic **stub provider** (`LLM_PROVIDER=stub`), so the full
-pipeline and eval run with **no API keys**. Real providers (Anthropic/Groq/Ollama) plug in via
-config — see [ESD §20](docs/ESD.md).
+**Aegis ships no stub, mock, or offline LLM provider.** Every agent output comes from a real
+model call through OpenRouter (`LLM_PROVIDER=openrouter`), so working API keys are required —
+without them the system fails loudly rather than fabricating an analysis that would be
+indistinguishable from a real one at the moment a human decides to trust it. See
+[ESD §20](docs/ESD.md) and the trade-off row in ESD §25.
+
+Sign-in is **Google OAuth via Firebase Authentication**. The browser's session credential is
+an httpOnly cookie Aegis issues itself; the Firebase ID token is exchanged once at
+`POST /auth/session` and never persisted client-side (ESD §8). Copy `.env.example` → `.env`
+and `frontend/.env.example` → `frontend/.env.local`, then place the Firebase service-account
+JSON at the gitignored path named by `FIREBASE_SERVICE_ACCOUNT_FILE`.
+
+Authorization is a fail-closed allowlist: `AEGIS_ADMIN_EMAILS` and `AEGIS_APPROVER_EMAILS`
+grant elevated roles, and any other authenticated Google account is provisioned `viewer`,
+which cannot approve a remediation.
 
 ## Status
 

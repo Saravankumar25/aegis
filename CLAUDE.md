@@ -2,7 +2,20 @@
 
 This file is the permanent operating guide for any AI agent (Claude Code or otherwise) working on this repository. Read it before starting any session. It is a living document: it is updated after every feature, not just at the start of the project.
 
-**Current phase:** **V1.5 complete.** MVP and V1.5 are both built, tested (148 backend tests + eval harness, frontend build/lint/typecheck clean) and verified end-to-end against the live kind cluster (Feature Log Entries 5 and 6). Future work is V2+ scope and should start with a fresh architecture review per Section 2. **MVP is complete** — built, tested (114 tests + eval harness), and verified end-to-end against the live kind cluster on 2026-07-21 (Feature Log Entry 5).
+**Current phase:** **V2e.** MVP and V1.5 are complete and verified end-to-end against the live kind cluster (Entries 5 and 6). V2a added Firebase/Google auth and made Redis load-bearing (Entry 8). V2b migrated to a dedicated Firebase project and built real semantic embeddings + a production RAG pipeline (Entry 9). V2c audited the **AI layer** — which turned out to be one real LLM agent out of seven — and began replacing simulated intelligence with genuine reasoning: versioned prompts, enforced structured outputs, streaming, a guardrails layer, LLM Triage (clamped), LLM Communication, and an LLM Observer critique running alongside the deterministic validator (Entry 10). **244 backend tests** pass; ruff clean.
+
+V2d made Correlation a real LLM tool-calling loop and replaced static routing with an LLM supervisor over a genuine graph cycle; every LLM call site now uses the prompt registry, guardrails and `prompt_ref`, enforced structurally in CI (Entry 11). V2e added LangSmith tracing and a deterministic RAG quality gate that runs in CI, plus a wired-but-unexecuted RAGAS harness (Entry 12). **274 backend tests** pass; ruff clean.
+
+**Known-open, tracked, and deliberately NOT claimed as done:**
+- **Retrieval has no relevance floor.** `rag_min_score` defaults to `0.0`, so an out-of-domain query returns confident operational runbooks and feeds distractors into the RCA prompt. **Measured, not suspected** — the `unanswerable` golden case fails. Fixing it needs care: cross-encoder scores are unbounded logits, not probabilities.
+- **LangSmith is wired but inert** until `LANGSMITH_API_KEY` is set. No trace has ever been emitted.
+- **RAGAS metrics are wired but have never been executed** — they need the optional extra *and* a judge model, so **no faithfulness or hallucination number exists yet**. The per-commit gate is the deterministic retrieval suite only.
+- **RCA alone does not use `complete_structured()`** — it needs pass-level retry semantics, so it keeps `complete()` + `_parse_pass`. It therefore gets no API-layer schema enforcement.
+- **LLM output quality is unverified end-to-end** — blocked on OpenRouter free-tier daily quota, not on code. Degradation paths *were* verified live under a real quota exhaustion.
+- **Resolution and Memory remain deterministic.** Resolution is a category→action catalog lookup gated by the four safety gates; Memory recall is a SQL filter. Both are candidates for LLM reasoning, neither has been converted, and the safety gates around Resolution must stay deterministic regardless.
+Any further work starts with a fresh architecture review per Section 2.
+
+**Environment constraint worth re-reading before anything else:** the backend venv **must** be Python 3.12 (see Entry 1 and Entry 9). A 3.14 venv installs cleanly and then fails at import time with what look like three unrelated corrupt-package errors.
 
 **Source of truth hierarchy:** PRD.md (what and why) → ESD.md (how, architecturally) → this file (day-to-day working rules). If code and ESD.md ever disagree, ESD.md is updated to match the code only if the deviation was a deliberate, reasoned improvement; otherwise the code is fixed to match ESD.md.
 
@@ -205,3 +218,257 @@ Each entry must include:
 - **Grounding hardened after real-model failures:** citation-resolves is necessary but **not sufficient** — `check_category_support` requires the cited evidence to actually support the asserted category (caught the real case of "a recent deployment caused this" with the deploy source down and zero deploy evidence). ESD §25 gained two trade-off rows. A degraded ensemble (fewer passes than requested) is always flagged low-confidence instead of reporting a lone pass as `agreement 1.00`.
 - **Assumption surfaced:** free-tier upstream capacity is intermittent. The eval harness now fails loudly when throttled rather than printing numbers that did not come from a real model; re-run `eval/run_real_eval.py` when capacity returns.
 - Tests: 166 passing (new `test_grounding.py` ×14, `test_no_fabrication.py` ×9).
+
+### 2026-07-21 — Entry 8: Firebase/Google auth, real Redis, health + metrics (V2a)
+- **Scope correction first.** The directive was to remove every mock/stub/placeholder. Audited
+  before building: Entry 7 had already removed them, and `tests/unit/test_no_fabrication.py`
+  fails the build if a stub provider reappears. The remaining `mock`/`fake` hits were legitimate
+  `httpx.MockTransport` contract fixtures under `tests/` and stale prose in docs. The genuine
+  gaps were: no Firebase auth, **Redis declared everywhere and used nowhere**, a hashing
+  (non-semantic) embedder, no LLM streaming, and stale docs. Built against that list, not the
+  assumed one.
+- **Firebase Authentication + Google OAuth (ESD §8).** Architecture review written first per §2
+  (new external dependency + new auth surface; findings in BUILD_LOG V2a). Token-exchange design:
+  the client SDK completes the Google popup only, its ID token is POSTed once to
+  `POST /auth/session`, verified server-side by the Admin SDK (signature, issuer, audience,
+  expiry, revocation, `email_verified`), and discarded — client persistence is set to
+  **in-memory before sign-in** so it never reaches IndexedDB, and `signOut()` follows the
+  exchange. **CLAUDE.md §12 is preserved, not amended.** Password auth is gone entirely:
+  `/auth/login`, `hash_password`/`verify_password`, the `passlib`/`bcrypt` dependency, and
+  `db/seed.py` were all deleted rather than left dormant.
+- **Authorization fails closed.** `AEGIS_ADMIN_EMAILS` / `AEGIS_APPROVER_EMAILS` grant elevated
+  roles; every other authenticated Google account is provisioned `viewer`, which cannot approve a
+  remediation. The role is re-resolved on **every** sign-in, so revoking an approver is an env
+  change plus their next login rather than a manual DB edit. This allowlist is the only thing
+  standing between "any Google account can sign in" and cluster write access — tested explicitly.
+- **Schema (migration `0004`).** `users.hashed_password` becomes **nullable** rather than being
+  filled with a sentinel: a federated user genuinely has no password, and a sentinel would be
+  indistinguishable from a real hash to every reader of the column (§15). Added `firebase_uid`
+  (unique, nullable — matched before email so an email change doesn't orphan an account),
+  `display_name`, `photo_url`, `last_login_at`.
+- **Redis is now real (ESD §14).** Previously present in `docker-compose.yml`, `pyproject.toml`
+  and `config.py` with **zero call sites**. Now backs a 30s read-only MCP evidence cache and HTTP
+  rate limiting. Verified live: real keys, counters and TTLs in the container.
+- **New convention — every Redis path fails open.** Redis is non-authoritative (§5), so a cache
+  miss does the real work and a rate-limit check allows the request when Redis is down. Failing
+  closed would convert a cache outage into a total outage. This is only safe because the
+  load-bearing limits (Tier-1 rate limit, circuit breaker, leases, kill switch) are enforced in
+  Postgres, and they deliberately stay there.
+- **New convention — the evidence cache is an allowlist of read tools, never a denylist of
+  writes.** With a denylist, a write tool added later is cacheable until someone remembers to
+  exclude it, and the failure mode is a cached success for a `restart_pod` that never executed.
+  Guarded by a structural test asserting no write verb can enter the allowlist.
+- **Bug found and fixed while verifying.** The rate limiter returned **500 instead of 429**:
+  `@app.middleware("http")` runs *outside* FastAPI's exception-handler stack, so a raised
+  `AegisError` escapes unhandled. The pre-existing `webhook_guard` had the same latent defect and
+  would have returned 500 instead of 401 for a bad webhook token. Both now return
+  `errors.error_response(...)`; `tests/integration/test_middleware.py` guards the regression.
+- **Health and metrics (ESD §7).** `/health` distinguishes dependencies by role — Postgres
+  unreachable → 503 (pull the instance), Redis unreachable → 200 `degraded` (never take an
+  instance out of rotation over a cache). `/metrics` is authenticated and reports incidents by
+  state, cumulative LLM tokens/cost/latency, and Redis keyspace stats.
+- **Verified live, not just in tests:** Firebase Admin initialized against the real project and
+  rejected a forged token (`InvalidIdTokenError`, token never logged); `/auth/login` now 404s;
+  120 requests allowed then a real 429 with `Retry-After`; Redis stopped → `degraded` at 200 with
+  the API still serving; Redis restarted → `ok`. **188 tests passing**, ruff clean, frontend
+  build/lint/typecheck clean.
+- **Still open (not done, deliberately):** the runbook embedder is still the non-semantic
+  `HashingEmbedder` (BGE swap agreed), and there is still no LLM streaming. Neither is claimed as
+  complete anywhere.
+- **Constraint surfaced:** `redis.asyncio` binds connections to the creating event loop, so the
+  client is cached **per loop**, not per process — a process-global client silently breaks any
+  runtime that uses more than one loop.
+- **Assumption surfaced (since resolved — see Entry 9):** the Firebase credentials supplied for
+  this entry belonged to a non-Aegis project, so Aegis shared a user pool with another
+  application and the allowlist was the only thing making that acceptable. A dedicated project
+  was recorded as the correct end state; Entry 9 migrated to one.
+
+### 2026-07-21 — Entry 9: Dedicated Firebase project, semantic embeddings, production RAG (V2b)
+- **Firebase migrated to the dedicated `aegis-ai-detective` project.** This closes the Entry 8
+  assumption: Aegis no longer shares a user pool with an unrelated application. Full replacement,
+  not an incremental edit — service-account JSON, `FIREBASE_PROJECT_ID`, and all six
+  `NEXT_PUBLIC_FIREBASE_*` values. A repo-wide sweep confirms no old project id, API key, app id,
+  sender id, bucket, or auth domain survives outside two historical journal notes, which were
+  amended (not erased — these logs are append-only, §19) because their claims had become false.
+  **No credential is hardcoded anywhere**: every value lives in gitignored env/secret files, which
+  is why the migration touched no source file.
+- **Environment defect found and fixed.** The backend venv had been recreated on **Python 3.14**
+  at the old path while the installed packages were `cp312` builds, so `pydantic_core`,
+  `asyncpg.protocol`, and `xxhash` all failed to import. CLAUDE.md pins 3.12 for exactly this
+  reason (Entry 1). Rebuilt on 3.12.10; suite green again. Worth knowing: the symptom presented as
+  three unrelated "corrupt package" errors, not as a version mismatch.
+- **Real semantic embeddings (FR-3.3, ESD §20).** `HashingEmbedder` is **deleted**. Replaced with
+  local ONNX **BGE (`bge-small-en-v1.5`) via `fastembed`** — chosen over sentence-transformers
+  because it is the same model quality for ~90MB of dependencies rather than ~2.5GB of torch, and
+  over a hosted API because retrieval must not acquire a network hop or a vendor (§18). Async
+  thread-offload so CPU inference never blocks the event loop; configurable model/dimension/batch
+  size, with a **load-time guard** that fails loudly if the model's width disagrees with
+  `EMBEDDING_DIM` (the alternative is an opaque pgvector error at INSERT).
+  BGE's query/passage asymmetry is honoured — queries go through `query_embed` for the
+  instruction prefix, passages do not; using one for both measurably degrades retrieval.
+- **Production RAG.** Retrieval now targets **chunks**, not documents (`runbook_chunks`,
+  migration `0005`): structure-aware Markdown chunking with configurable size/overlap, heading
+  trails carried into the embedded text, **hybrid** retrieval (pgvector HNSW + Postgres full-text)
+  fused with **Reciprocal Rank Fusion**, **metadata filtering** on `service_tags` applied inside
+  both retrievers, **cross-encoder reranking** over an over-fetched candidate pool, configurable
+  top-k, and section-level citations. Every stage degrades independently — no reranker → fused
+  order, no lexical hits → semantic order, no embedder → lexical only.
+- **New convention — RRF over score blending for hybrid retrieval.** A cosine distance and a
+  `ts_rank` are not commensurable, so any fixed weighting is arbitrary and drifts as the corpus
+  changes. Fuse *ranks*, which are comparable by construction.
+- **New convention — index freshness is content AND model AND dimension AND chunks-exist.**
+  Introduced because hash-only freshness was a **real shipped defect**: right after chunking
+  landed, re-ingestion reported `changed=false` for every document and built **zero chunks**, so
+  every RAG query would have returned nothing while ingestion logged success. `runbooks` now
+  records `embedding_model`/`embedding_dim` (migration `0006`), so changing the model re-indexes
+  automatically. Both failure modes have regression tests.
+- **Bug fixed: chunking silently dropped short sections.** `min_chars` was applied to whole
+  sections, so a terse "Mitigation: raise the memory limit and redeploy" — the most actionable
+  content in the corpus — was discarded. It now applies only to fragments produced by splitting.
+- **Bug fixed: citations stuttered** as "Runbook: OOM › Runbook: OOM", because a document's H1 is
+  usually also its title. Regression-tested.
+- **Verified live, not just in tests:** Firebase Admin initializes against `aegis-ai-detective`
+  and rejects a forged token; `/auth/login` still 404s; the real corpus re-indexed and answers
+  "containers keep dying because they used too much RAM" with the OOM runbook top-1 **despite zero
+  shared vocabulary** — the query the old embedder structurally could not serve — while the exact
+  identifier `OOMKilled` is matched by `semantic,lexical` together, and a `catalog-service` filter
+  returns only chunks tagged for it. **211 tests passing** (was 188), ruff clean.
+- **Constraint surfaced:** the shipped runbook corpus is four ~650-char documents with no
+  subheadings, so it yields one chunk each. Chunking is correct but its value is unexercised at
+  this corpus size; the multi-section behaviour is covered by unit and integration tests using
+  structured fixtures.
+- **Still open (not done, not claimed):** LLM streaming, and the deeper observability pass
+  (trace IDs, per-stage latency for embedding/retrieval/MCP).
+
+### 2026-07-21 — Entry 10: AI-layer audit + real LLM reasoning, guardrails, versioned prompts (V2c)
+- **Audit first, and it contradicted the project's own claims.** Of seven "agents", exactly
+  **one** (RCA) called an LLM. Triage was two `set` lookups; Correlation was five hardcoded MCP
+  calls in fixed order; Observer was regexes; Communication was `str.format()`; Resolution was a
+  dict lookup; the "Supervisor" graph was static edges with one boolean conditional.
+  `langchain-core` and `langsmith` were installed and **imported nowhere**. Recorded in full in
+  BUILD_LOG V2c.
+- **Safety carve-out, agreed explicitly before building.** The literal instruction was that every
+  decision become an LLM call. Five components stay deterministic because converting them is a
+  security regression, not an upgrade: Observer citation-resolution (a watchdog must not share
+  the failure modes of the thing it watches), redaction (an LLM redactor can be injected into not
+  redacting), the four execution gates (an LLM deciding "is this permitted" means an injected log
+  line can authorise a cluster write), the ingestion severity floor (PRD 11A requires severity in
+  <1s), and state-machine transitions. This matches the directive's own closing rule that Python
+  owns *security and deterministic business logic*.
+- **New convention — LLM judgment is clamped, never trusted, where safety depends on it.** Triage
+  now genuinely reasons about customer impact, but may only **raise** severity above the
+  rule-based floor, never lower it. Escalation is judgment; de-escalation is an attack surface —
+  otherwise a crafted alert title could downgrade a P1 and suppress the page. Tested both ways.
+- **New convention — guardrails and the Observer are different layers.** The Observer validates
+  *reasoning*, once, at the end. Guardrails (`guardrails/`) govern *every model interaction*,
+  including calls no Observer ever sees. Guardrails are deterministic on purpose: a model asked
+  to detect prompt injection is itself an injection target.
+- **New convention — ingress fails open, egress fails closed.** A jailbreak pattern in evidence is
+  recorded and passed through (blocking would let anyone who can write a log line deny incident
+  response); credential-shaped model output is blocked outright (unrecoverable once sent).
+- **Versioned prompts (`agents/prompts/`).** Every prompt has an id, version, declared input
+  contract, and content fingerprint, recorded on each agent step as `prompt_ref`. Rendering with a
+  missing variable now raises instead of sending a literal `{service}` to a model — which would
+  produce a plausible answer to a malformed question, the one failure nothing downstream detects.
+- **Structured outputs are enforced, not hoped for.** `complete_structured()` requests the schema
+  from the API, validates with Pydantic, and repairs by feeding the *validation error* back
+  (a blind retry re-samples the same misunderstanding). Unrepairable output raises rather than
+  returning a half-parsed object. Also added real token streaming, which deliberately does **not**
+  fail over between models after the first delta — that would splice two completions into one
+  apparently coherent answer.
+- **Bug found by the audit: the alert kind was discarded at ingestion.** `AlertIn.kind` was used
+  for the provisional severity and then thrown away, so the graph's triage node called
+  `classify_severity(service, "error_rate")` with the kind **hardcoded** — every incident was
+  triaged as an error-rate alert whatever had actually fired. Migration `0007` persists
+  `alert_kind`/`alert_value`; existing rows are left NULL rather than backfilled, since inventing
+  "error_rate" would bake the bug into history.
+- **Bug fixed: `CritiqueResult.verdict` was a bare `str`** with its allowed values stated only in
+  prose, so structured-output enforcement could not constrain it and "approve with reservations"
+  would have read as a rejection. Now a `Literal`.
+- **Verified:** 244 tests passing (was 211), ruff clean. Live verification of the *LLM output* is
+  **blocked on OpenRouter daily quota**, not on code — but the quota exhaustion did verify the
+  degradation paths for real: Triage fell back to the rule floor and Communication to its
+  template, and the pipeline continued rather than stalling.
+- **Still open (not claimed):** Correlation tool-selection loop and supervisor routing are
+  designed and prompted (`correlation.plan`, `supervisor.route` are registered) but not yet
+  wired — Correlation still calls its fixed five-tool sequence. LangSmith tracing and
+  DeepEval/RAGAS evaluation are not started. LangChain remains unused.
+
+### 2026-07-21 — Entry 11: Agentic Correlation + LLM supervisor; every call site on the registry (V2d)
+- **Correlation is now an LLM tool-calling loop** (`agents/correlation/planner.py`). Replaces a
+  fixed five-call sequence that ran identically for every incident and could not follow a lead —
+  it never fetched a *specific* pod's detail because it did not know which pod was unhealthy
+  until after it had finished. The loop is plan → dispatch → observe → re-plan, so round two acts
+  on what round one found.
+- **New convention — the model chooses tools from an allowlist; Python dispatches them.**
+  `agents/correlation/tools.py` is a read-only catalog. A tool name absent from it is never
+  dispatched, so evidence gathering is structurally incapable of reaching `restart_pod` or
+  `scale_deployment` no matter what an injected log line requests. Rejections are returned to the
+  model with a reason rather than dropped, because a silently dropped call looks to the model
+  like a tool that returned nothing — and it will reason from that absence.
+- **Supervisor routing is now an LLM decision** (`orchestrator/supervisor.py`), and the graph is a
+  real cycle: every step returns to the supervisor. `available_steps()` computes the legal set
+  from state and a choice outside it is overridden — so the model can decide another RCA pass is
+  needed but cannot exceed the revision limit, exceed the token budget, reach `resolution`
+  without an observer-validated hypothesis, or decline to ever finalize.
+- **New convention — an agentic loop needs a cap per *step type*, not only a global one.** Two
+  real loops were found and fixed while building this: (1) gating correlation on *evidence
+  gathered* rather than *having run* looped forever when every source was down — correlation was
+  the only legal step, produced nothing but gaps, and was chosen again; (2) `correlation` stayed
+  permanently available after a rejected hypothesis, and "gather more evidence" is always a
+  plausible next step, so a model that favours it never concludes. Both hit LangGraph's recursion
+  limit rather than terminating. Now bounded by `correlation_max_invocations`, with the recursion
+  limit retained as a backstop for the case where routing and bounds disagree.
+- **Graph flow bug fixed:** the supervisor could route to `resolution`, which had a direct edge to
+  `END` — so an incident could finish without `finalize`, meaning no state transition and no audit
+  record. `resolution` now returns to the supervisor; only `finalize`/`escalate` end the run.
+- **Every LLM call site is now compliant.** The audit found RCA — the one agent that had always
+  been "real AI" — was the last using an inline f-string, raw `complete()`, and no guardrails.
+  It now renders `rca.hypothesis` from the registry, records `prompt_ref`, and screens its prompt.
+  Guarded by `tests/unit/test_llm_call_compliance.py`, which parses the AST of every module and
+  fails on a call site that skips the registry, `prompt_ref`, or guardrails — **and** fails if one
+  of the six agent modules stops calling a model at all, which is how fake AI would creep back.
+- **Verified:** 267 tests passing (was 244), ruff clean.
+- **Still open, explicitly not done:** LangSmith tracing (item 4) and the DeepEval/RAGAS
+  evaluation framework (item 5) are **not started**. `langsmith` and `langchain-core` remain
+  installed and unused. RCA still uses `complete()` with per-pass parsing rather than
+  `complete_structured()` — deliberate, because the ensemble needs pass-level retry semantics
+  that `_parse_pass` provides, but it means RCA alone does not get schema enforcement at the API
+  layer. End-to-end validation against real models (item 7) remains blocked on OpenRouter quota.
+
+### 2026-07-21 — Entry 12: LangSmith tracing + evaluation framework (V2e)
+- **LangSmith (`core/tracing.py`).** Traces every graph node, every LLM call (model actually used
+  *after fallback*, tokens, cost, latency, schema-repair attempts) and every MCP tool call, with
+  one trace per investigation tagged by `incident_id` so a production incident is findable by the
+  same id used everywhere else. Wrapping happens at the **provider**, not per agent, because that
+  is the only place that knows which model actually answered — precisely the field needed when
+  diagnosing why one incident behaved differently from another.
+- **New convention — observability is never load-bearing.** Every tracing entry point is a no-op
+  when LangSmith is unconfigured or unreachable, and `traced()` returns the *undecorated*
+  function when tracing is off, so a traced and untraced deployment are behaviourally identical.
+  A tool that explains failures must not be able to cause one.
+- **Evaluation framework (`evaluation/`), split by what each metric costs to run.** Deterministic
+  retrieval metrics (hit rate, MRR, precision@k, NDCG@k, forbidden rate) are ~40 lines of
+  arithmetic — no model, no network, no quota — so they gate **every commit**. LLM-judged RAGAS
+  metrics (faithfulness, relevancy, context precision) cost tokens, so they are on-demand.
+- **New convention — evaluation dependencies are not runtime dependencies.** RAGAS is an optional
+  extra (`pip install -e ".[eval]"`). It pulls ~37 packages including pandas, pyarrow, datasets,
+  langchain and openai, and downgrades `fsspec`, which the embedding stack depends on. Shipping
+  that into the production image to support a CI-only measurement is a poor trade; absence
+  degrades to `available=False`, never an import error.
+- **New convention — a golden case must not reuse the corpus's own vocabulary.** A query phrased
+  in the document's words measures string matching, not retrieval. The dataset deliberately
+  includes adversarial cases: wrong-service queries, symptom-only queries with zero lexical
+  overlap, and an **unanswerable** query where returning nothing is the correct behaviour.
+- **The framework immediately found real weaknesses, which is the point.** Measured against the
+  actual shipped corpus: `hit_rate=0.86 mrr=0.65 ndcg=0.70 forbidden=0.14`. The `unanswerable`
+  case **fails**: `rag_min_score` defaults to `0.0`, so there is **no relevance floor** and
+  retrieval always returns `k` results however irrelevant — an out-of-domain query returns
+  confident operational runbooks, feeding distractors straight into the RCA prompt. `mrr=0.65`
+  shows two cases finding the right document only at rank 3–4, which hit rate alone hides.
+  Recorded as the honest baseline, not a target.
+- **Verified:** 274 tests passing (was 267), ruff clean.
+- **Still open:** the relevance floor above; LangSmith is inert until `LANGSMITH_API_KEY` is set;
+  RAGAS metrics are wired but have never been executed (they need the extra *and* a judge model),
+  so **no faithfulness or hallucination number exists yet**; end-to-end real-model validation
+  remains blocked on OpenRouter quota.

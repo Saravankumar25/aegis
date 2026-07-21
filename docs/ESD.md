@@ -215,8 +215,35 @@ Composite index on `(service_name, incident_type)` — the compound scoping key 
 `key (pk) · value (jsonb) · updated_at`
 Durable system-wide flags; the `kill_switch` row is the kill switch itself (FR-5.3) — persistent across restarts, shared by all workers, checked immediately before any execution.
 
+**runbook_chunks** *(added V2b — the unit retrieval actually searches)*
+`id · runbook_id (fk, cascade) · chunk_index · content · heading_path · service_tags · embedding vector(384) · search_vector tsvector`
+Retrieval targets passages, not documents: a single vector per document averages away the
+distinction between the sections it covers, and a citation to a 200-line file does not tell a
+responder where to look. Indexed twice — HNSW over `embedding` for semantic match, GIN over
+`search_vector` for lexical match on identifiers (`OOMKilled`, service names) that embeddings
+handle poorly — plus GIN over `service_tags` so metadata filtering narrows the scan rather than
+filtering its output. `search_vector` is maintained by a **trigger**, not by the application:
+application-side maintenance drifts the moment any other writer touches the table, and a lexical
+index silently returning stale rows is much harder to notice than a failed write.
+`runbooks.embedding` was **dropped** in the same migration — it held 768-dim vectors from the
+removed hashing embedder, and a stale vector that still answers similarity queries with
+meaningless numbers is worse than no column at all (CLAUDE.md §15).
+
+`runbooks` additionally carries `embedding_model` and `embedding_dim` (**index provenance**).
+Content is only one input to an index; it also goes stale when the model or dimension changes.
+Deciding freshness on the content hash alone was a real defect — after chunking landed, every
+document reported "unchanged" and produced zero chunks, leaving the corpus silently
+unretrievable while ingestion logged success.
+
 **users**
-`id · email · hashed_password · role(admin|on_call_engineer|viewer) · created_at`
+`id · email (unique) · firebase_uid (unique, nullable) · hashed_password (nullable) · display_name (nullable) · photo_url (nullable) · role(admin|on_call_engineer|viewer) · last_login_at (nullable) · created_at`
+*(V2a, migration `0004`)* Identity is federated, so `hashed_password` is **null for every
+federated user** rather than carrying a sentinel — a sentinel would be indistinguishable from a
+real hash to every reader of the column. `firebase_uid` is the stable subject claim and is
+matched *before* email, so changing a Google account's email updates the row instead of orphaning
+it; it is unique-but-nullable because Postgres treats each NULL as distinct, so the constraint
+binds only on rows that actually carry a uid. `role` is derived from the operator allowlist on
+every sign-in and is never read from a token claim.
 
 **refresh_sessions** *(added in M5 for the ESD §8 rotation/reuse-detection requirement)*
 `id · user_id (fk) · token_hash (sha256, unique) · family_id · expires_at · rotated_at (nullable) · revoked_at (nullable) · created_at`
@@ -258,14 +285,23 @@ All endpoints are versioned under `/api/v1`.
 | `/incidents/{id}/resolve` | POST | V1.5 | Human resolution; drafts the FR-7.1 memory summary. Requires `on_call_engineer`/`admin` (added V1.5c) |
 | `/memory/pending` | GET | V1.5 | Draft memory summaries awaiting FR-7.2 approval (added V1.5c) |
 | `/memory/{id}/approve` | POST | V1.5 | Approve/edit a draft summary — the write-back gate. Requires `on_call_engineer`/`admin` (added V1.5c) |
-| `/auth/login` | POST | MVP | Issues httpOnly access + refresh cookies |
+| `/auth/session` | POST | V2 | Exchanges a verified Firebase ID token for httpOnly access + refresh cookies. Replaced `/auth/login` when auth became federated (V2a) |
 | `/auth/refresh` | POST | MVP | Rotates refresh token, detects reuse |
-| `/auth/me` | GET | MVP | Current authenticated user and role |
-| `/runbooks/search` | GET | MVP | RAG search over the runbook/postmortem corpus |
+| `/auth/logout` | POST | MVP | Revokes the refresh family and clears cookies |
+| `/auth/me` | GET | MVP | Current authenticated user, role, and profile |
+| `/runbooks/search` | GET | MVP | Hybrid (semantic + lexical) chunk retrieval over the runbook corpus. V2b added `service` (metadata filter) and `rerank` params; results are chunks with section-level `citation` and a `matched_by` provenance list |
+| `/health` | GET | MVP | Dependency health. Postgres unreachable → 503 (`unhealthy`); Redis unreachable → 200 (`degraded`), because a cache outage must not pull an instance from rotation. Exempt from rate limiting |
+| `/metrics` | GET | V2 | Incident counts by state, cumulative LLM tokens/cost/latency, Redis keyspace stats. Authenticated — these describe production activity (added V2a) |
 
 ## 8. Authentication & Authorization
 
-Self-issued JWT, chosen over a third-party OAuth provider to avoid coupling the project to a specific cloud vendor. **[review fix]** Tokens are stored exclusively in httpOnly, Secure, SameSite=Strict cookies, never in localStorage or any JavaScript-readable location. Access tokens are short-lived (15 minutes); refresh tokens are longer-lived (7 days) and rotated on every use, with reuse of an already-rotated refresh token treated as a signal of token theft and triggering session invalidation for that user.
+**[V2a]** Identity is federated through **Firebase Authentication / Google OAuth 2.0**; the session is still self-issued. The two concerns are deliberately separated: Google proves *who the caller is*, and Aegis decides *what they may do* and owns the session lifetime.
+
+The Firebase client SDK is used for exactly one thing — completing the Google popup. Its ID token is POSTed once to `/auth/session`, verified server-side by the Firebase Admin SDK (signature, issuer, audience = this project id, expiry, revocation, and `email_verified`), and immediately discarded: client persistence is set to in-memory *before* sign-in so the token never reaches IndexedDB, and `signOut()` runs straight after the exchange. Nothing in the request body is trusted as identity. This is what preserves the CLAUDE.md §12 non-negotiable — the browser's only durable credential remains a cookie JavaScript cannot read.
+
+Authorization is a **fail-closed email allowlist**, re-evaluated on every sign-in rather than only at account creation, so revoking an approver is an env change plus their next login. `AEGIS_ADMIN_EMAILS` → `admin`, `AEGIS_APPROVER_EMAILS` → `on_call_engineer`, everything else → `viewer`. Because any Google account can authenticate, this allowlist is the single control that keeps authentication open while authorization stays closed. Revocation latency is bounded by the 15-minute access-token TTL; refresh-family revocation is the immediate lever.
+
+Tokens are stored exclusively in httpOnly, Secure, SameSite=Strict cookies, never in localStorage or any JavaScript-readable location. Access tokens are short-lived (15 minutes); refresh tokens are longer-lived (7 days) and rotated on every use, with reuse of an already-rotated refresh token treated as a signal of token theft and triggering session invalidation for that user.
 
 Roles: `admin`, `on_call_engineer`, `viewer`. **[review fix]** Approval of a Tier-2/3 proposal, clearing the circuit breaker, and triggering the kill switch are all restricted to `on_call_engineer` or `admin`; `viewer` can see everything but act on nothing. Role is checked server-side on every state-changing endpoint; the frontend's role-based UI gating is a convenience layer only.
 
@@ -306,7 +342,14 @@ Every log line, LLM trace (LangSmith), and OpenTelemetry span carries the `incid
 
 ## 14. Caching Strategy
 
-Redis caches two things: identical prompt+context hashes within the same incident run (avoiding redundant LLM calls across ensemble ambiguity or agent retries), and short-TTL (60s) caches of repeated MCP tool calls within a single incident (e.g., the same Prometheus query issued by both Correlation and RCA). Cache keys always include the incident ID to prevent cross-incident leakage. Redaction happens before a value is cached, never after, so cached content is never a route around the redaction pipeline. **[review fix]**
+Redis is a cache and coordination layer and **nothing may treat it as authoritative** (CLAUDE.md §5). Postgres holds every fact the system would be wrong to lose, and the V1.5 safety mechanisms — resource leases, circuit breaker, kill switch — deliberately do *not* live in Redis: a lease enforced by a store that can be flushed is not a safety mechanism.
+
+**[V2a — as built]** Two uses:
+
+1. **Read-only MCP evidence cache**, 30s TTL. The RCA ensemble makes several passes over the same window within seconds, so the same Prometheus query or pod-log fetch is otherwise paid for repeatedly. Cacheability is an explicit **allowlist** of read tools, never a denylist of writes: with a denylist a newly added write tool would be cacheable until someone remembered to exclude it, and the failure mode is returning a cached success for a `restart_pod` that never executed. Only `ok=true` results are cached — caching a failure would turn one transient blip into a full TTL of manufactured unavailability. Redaction happens before a value is cached, never after, so the cache is never a route around the redaction pipeline. **[review fix]**
+2. **HTTP rate limiting**, fixed-window per client IP per route template. DoS protection only; the load-bearing remediation limits stay in Postgres.
+
+**Every Redis operation fails open.** A cache read misses and the caller does the real work; a rate-limit check allows the request. Failing closed would convert the loss of an explicitly non-authoritative component into a total outage. That the safety-critical limits live in Postgres is precisely what makes fail-open safe here.
 
 ## 15. Performance Considerations
 
@@ -445,3 +488,13 @@ GitHub Actions pipeline: lint (ruff, eslint) → unit tests → contract tests �
 | Fallback when no model answers | Raise and leave the incident for the retry sweep | Degrade to a deterministic offline analysis | An offline answer is indistinguishable from a real one at the point a human decides to trust it. Degrading *throughput* is acceptable; degrading *truthfulness* is not. The system therefore ships no stub, mock, or offline provider at all |
 | Claim validation depth | Citation must resolve **and** the cited evidence must support the asserted category | Citation-resolves-only | Found live: a model asserted "a recent deployment introduced a bug" while the deploy source was unavailable and no deploy evidence existed. Every citation resolved, so citation-only validation approved it. Category support closes that hole |
 | Ensemble RCA cost | 3 concurrent reasoning passes | A single pass | Buys a real, structured agreement-score signal (Section 6.1's structured output) instead of a single unverifiable confident answer; cost is bounded by the per-incident token budget (Section 15) |
+| Identity via Firebase/Google OAuth, session still self-issued | Firebase session cookies, or a client-held ID token | A client-held token lives in IndexedDB, which JavaScript can read — that would reverse the §12 non-negotiable. Firebase's own session cookies would satisfy §12 but replace the refresh-family rotation and reuse-detection already built and tested. Exchanging the ID token once for our own cookie keeps both properties |
+| Role from a fail-closed email allowlist, re-resolved every sign-in | Store the role on the user row and edit it by hand; or a self-serve invite/promotion UI | Any Google account can authenticate, so authorization is the only gate on cluster writes. An env-var allowlist keeps it reviewable in one place and revocable without a database edit. A promotion UI is a larger surface that would need its own authorization story |
+| Redis fails open on every path | Fail closed on rate limiting | Redis is explicitly non-authoritative. Failing closed turns a cache outage into a full API outage — a strictly worse failure for a component nothing is allowed to trust. Safe only because the load-bearing limits (Tier-1 rate limit, circuit breaker) are enforced in Postgres |
+| MCP evidence cache is an allowlist of read tools | Denylist of known write tools | With a denylist, any write tool added later is cacheable until someone remembers to exclude it, and the failure is a cached success for an action never executed against the cluster — indistinguishable from a real one where an operator decides to trust it |
+| Local ONNX BGE (`fastembed`) for embeddings | sentence-transformers + torch; or a hosted embedding API | Same BGE model quality for ~90MB of dependencies instead of ~2.5GB of torch, which decides whether the container image is reasonable. A hosted API would put a network hop and a vendor on the retrieval path, against the local-first constraint (CLAUDE.md §18) |
+| Retrieval over chunks, not documents | One embedding per runbook | A document vector is the average of everything the document discusses, so it matches every one of its topics weakly and none well — and a citation to a whole file does not tell a responder where to look, defeating the grounding the citation exists to provide |
+| Hybrid retrieval fused with RRF | A weighted blend of cosine and `ts_rank` | The two scores are not commensurable — different scales, different distributions — so any fixed weighting is arbitrary and drifts as the corpus grows. RRF consumes only ranks, which are comparable by construction |
+| Cross-encoder rerank over an over-fetched shortlist | Return the retriever's own order | A bi-encoder embeds query and passage independently and can only compare two summaries written without knowledge of each other; a cross-encoder reads them together. Too expensive corpus-wide, ideal on a shortlist — which is why `rag_candidate_k` must exceed `rag_top_k` |
+| Index freshness = content **and** model **and** dimension **and** chunks-exist | Content hash alone | Content is only one input to an index. Hash-only freshness shipped a real defect: after chunking was introduced, ingestion reported every document unchanged and built zero chunks, so retrieval returned nothing while the logs looked healthy |
+| `search_vector` maintained by a database trigger | Maintained in the ingestion code path | Application-side maintenance drifts as soon as any other writer touches the table, and a lexical index quietly returning stale rows is far harder to detect than a write that fails loudly |

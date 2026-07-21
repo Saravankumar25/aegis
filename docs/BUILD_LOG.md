@@ -9,27 +9,38 @@ each piece. Source-of-truth hierarchy: PRD.md → ESD.md → CLAUDE.md → this 
 
 ## Current status / resume here (as of 2026-07-21)
 
-**MVP and V1.5 are both COMPLETE and verified end-to-end.** 148 backend tests + the eval
-harness pass; ruff clean; frontend `next build` / `next lint` / `tsc --noEmit` clean.
+**MVP, V1.5, V2a (auth + Redis), V2b (semantic RAG), V2c/V2d (real LLM agents) and V2e
+(tracing + evaluation) are complete.** **274 backend tests** pass; ruff clean; frontend
+`next build` / `next lint` / `tsc --noEmit` clean.
 
-Live-verified this session: an injected checkout failure produced a 4-agent investigation over
-real MCP stdio ending in an observer-validated hypothesis; a Tier-2 scale proposal was approved
-through the API and executed by the worker against the real kind cluster (2→3 replicas), then
-its compensating action restored 2→3→2 and resolution drafted a memory summary pending human
-approval.
+Six of seven agents now perform genuine LLM reasoning; the seventh (Resolution) is a deliberately
+deterministic action catalog behind the four safety gates. Routing is an LLM supervisor over a
+real graph cycle with Python-enforced bounds. Every LLM call site uses the versioned prompt
+registry, guardrails and `prompt_ref`, enforced structurally in CI by
+`tests/unit/test_llm_call_compliance.py`.
 
-**Anything next is V2+ scope** — start with the CLAUDE.md §2 architecture review. The open
-follow-ups worth knowing: real LLM providers behind `providers/factory.py` (the eval harness now
-exists to measure them), a LangGraph Postgres checkpointer (deliberately deferred — see the ESD
-§25 row; V1.5 runs now have side effects, so this is the first thing to revisit), rolling
-`audit_log` partition maintenance, and the public demo deployment (ESD §18).
+**Open follow-ups, in priority order:**
+1. **`rag_min_score` is `0.0`, so retrieval has no relevance floor.** An out-of-domain query
+   returns confident operational runbooks (measured — see the V2e eval results below). Fixing it
+   needs care: cross-encoder scores are unbounded logits, not probabilities.
+2. **LangSmith is wired but inert** — set `LANGSMITH_API_KEY` to get traces.
+3. **LLM output quality is unverified end-to-end**, blocked on OpenRouter daily quota. Degradation
+   paths were verified live under real quota exhaustion.
+4. **RAGAS metrics are wired but never executed** — they need both the optional extra and a judge
+   model. No faithfulness/hallucination number exists yet.
+5. **Resolution and Memory remain deterministic** (category→action catalog; SQL recall filter).
+   Both are LLM candidates; the safety gates around Resolution are not.
+6. A LangGraph Postgres checkpointer (deferred — see the ESD §25 row), rolling `audit_log`
+   partition maintenance, and the public demo deployment (ESD §18).
 
 **Environment quick-start:** `docker compose up -d` (Postgres :5433) · kind cluster `aegis`
 (`bash infra/setup-cluster.sh` if gone) · `bash infra/gen-mcp-credentials.sh` **each session**
 (tokens live 24h; prints the current `K8S_API_URL` — kind's port changes if the cluster is
 rebuilt) · API `uvicorn api.main:app --port 8000` · worker `python -m worker.main` · frontend
-`npm run dev` · seed `python -m db.seed` + `python -m rag.seed` (local password
-`aegis-local-dev`). All three processes are also defined in `.claude/launch.json`.
+`npm run dev` · seed `python -m rag.seed`. There is no user seed script: auth is federated, so
+an Aegis user row is created on that person's first Google sign-in, with the role their email
+resolves to in `AEGIS_ADMIN_EMAILS` / `AEGIS_APPROVER_EMAILS`. All three processes are also
+defined in `.claude/launch.json`.
 
 **Gotcha:** never run `next build` while the dev server is up — it corrupts `.next` and the app
 serves unstyled HTML until you stop the server, `rm -rf .next`, and restart.
@@ -690,3 +701,264 @@ positive, degraded ensembles, real-model JSON shapes) and `tests/unit/test_no_fa
 (9 — the stub module is *gone* not just unregistered, the factory refuses every non-real provider
 name, an exhausted provider raises instead of answering, and a fully-throttled key×model matrix
 still refuses to invent output).
+
+---
+
+## V2a — Firebase Authentication + Google OAuth (architecture review)
+
+New external dependency (Google Identity Platform) and a **new auth surface**, so CLAUDE.md §2
+requires this review *before* implementation code. Findings, in the five standing categories.
+
+### Reliability
+- **Google is now in the login path.** If Identity Platform is unreachable, nobody can obtain a
+  new session. Mitigation: the exchange is a *one-time* cost. Once the httpOnly session cookie is
+  minted, every subsequent request is verified against our own JWT secret with no Google call, so
+  an outage degrades to "no new logins" rather than "everyone is ejected".
+- **Public-key fetch.** Admin-SDK ID-token verification needs Google's rotating x509 certs. The SDK
+  caches them; a cold start during a Google outage fails closed (401), never open.
+- **Clock skew** breaks JWT `iat`/`exp` validation in both directions. Verification uses the SDK's
+  default tolerance rather than a hand-rolled comparison.
+
+### Safety
+- Auth is upstream of the V1.5 approval gates. A bug that over-grants a role converts into
+  unauthorized cluster writes, so role assignment **fails closed**: an email absent from
+  `AEGIS_APPROVER_EMAILS` is provisioned `viewer`, which cannot approve anything. There is no code
+  path where an unrecognized Google account receives `on_call_engineer` or `admin`.
+- The four execution gates (kill switch → expiry → tier/approval → observer+blast-radius+breaker)
+  are untouched by this change. Auth decides *who is asking*, never *whether the action is safe*.
+
+### Security
+- **The §12 non-negotiable is preserved by design, not by accident.** The Firebase client SDK
+  stores ID tokens in IndexedDB, which JavaScript can read. So the client SDK is used *only* to
+  complete the Google popup; the ID token is POSTed once to `/auth/session` and the client is
+  signed out immediately, leaving nothing JS-readable. The browser's durable credential remains
+  our existing httpOnly/Secure/SameSite=Strict cookie.
+- **ID tokens are verified, never trusted.** `verify_id_token` checks signature, issuer, audience
+  (must equal our project id) and expiry server-side. A client-supplied `email` or `uid` field is
+  ignored entirely; identity comes only from verified claims.
+- **`email_verified` is enforced.** Google accounts always set it, but a federated provider on the
+  same Firebase project might not, and an unverified email would defeat the allowlist.
+- **Service account key is a high-value secret.** It grants project-wide Firebase admin. Stored in
+  a gitignored file referenced by path via env var — never inlined in code, never logged, never
+  committed. `.gitignore` was extended before the key was written to disk.
+- **Shared Firebase project.** *(Resolved in V2b — see below.)* The credentials supplied for V2a
+  belonged to a non-Aegis project, so Aegis shared a user pool with another application: anyone
+  who could sign into that app was authenticated (though not authorized) here. The allowlist was
+  what made it acceptable, and a dedicated project was recorded as the correct end state. V2b
+  migrated to the dedicated `aegis-ai-detective` project, closing this.
+- **Account-takeover blast radius.** Compromise of an allowlisted Google account now yields
+  approval rights. This is a real reduction in defense-in-depth versus a password we control, and
+  is accepted deliberately: Google's own MFA and anomaly detection are stronger than anything this
+  project would implement, and the allowlist bounds the exposed set to named individuals.
+
+### Scalability
+- Verification is signature-checking against cached public keys: constant-time, no per-request
+  network hop, no shared state. It does not constrain horizontal scaling.
+- User provisioning on first sign-in is an upsert keyed on the unique `email` column, so
+  concurrent first-logins from the same account collapse to one row rather than racing.
+
+### Operational maturity
+- Role changes are an env-var edit plus a restart. Acceptable at this scale, and it keeps
+  authorization reviewable in one place rather than mutable through a UI. A promotion flow is V2+.
+- Revocation has a bounded window: removing an email from the allowlist does not invalidate an
+  already-issued access token, so the existing 15-minute access TTL is the revocation SLA.
+  Refresh-family revocation remains the immediate lever.
+- Loss of the service account key is recoverable (rotate in console, update the file); no Aegis
+  data is encrypted with it.
+
+### Decisions carried into implementation
+1. Token exchange, not client-held tokens — §12 stands unamended.
+2. `AEGIS_APPROVER_EMAILS` allowlist grants elevated roles; everyone else is `viewer`.
+3. The existing refresh-rotation + family-revocation machinery is retained; Firebase replaces only
+   the *credential presentation* step, not session management.
+4. `users.hashed_password` becomes nullable — a federated user has no password. Per CLAUDE.md §15
+   this is a schema change requiring a migration, not a repurposed column.
+
+### V2a — as built
+
+**Firebase auth.** `api/firebase_auth.py` is the only place a Google identity enters the system.
+It returns a verified identity or `None` — there is no branch that returns an identity on an
+error path, so every failure mode (malformed, wrong project, expired, revoked, unverified email,
+Firebase unreachable) denies. `firebase_admin`'s verification is synchronous and may fetch
+Google's rotating certs, so it runs via `anyio.to_thread` rather than holding the event loop
+during someone else's TLS handshake. `FirebaseConfigError` is separated from a rejection and
+surfaces as **503**, not 401: a misconfigured deployment should not send users off to re-check a
+password they do not have.
+
+**Redis.** `core/redis.py`. The client is cached **per event loop**, not per process —
+`redis.asyncio` binds connections to the creating loop, and a process-global client raised
+"Event loop is closed" across a test suite with a loop per test. Loop-awareness is the real fix;
+closing the client in a test fixture would have hidden a genuine multi-loop hazard.
+
+**Defect found during live verification.** The rate limiter returned 500 rather than 429.
+`@app.middleware("http")` executes outside the `ExceptionMiddleware` that FastAPI installs, so a
+raised `AegisError` is never converted by the registered handlers. The pre-existing
+`webhook_guard` shared the defect and would have returned 500 instead of 401 for a bad webhook
+token — it was never caught because no test asserted the status. Both now return
+`errors.error_response(...)`, and `tests/integration/test_middleware.py` asserts the exact status
+and `error_code` for each.
+
+**Measured live (real dependencies, genuine calls)**
+- Firebase Admin initialized against the then-current project; a forged token was rejected with
+  `InvalidIdTokenError`. The token itself never appears in a log line. *(The project was replaced
+  in V2b; the verification was re-run against `aegis-ai-detective`.)*
+- `POST /auth/login` → **404** (password auth removed, not merely bypassed).
+- 120 requests allowed, then a real **429** with `Retry-After: 60` and the error envelope.
+- Redis stopped → `/health` reports `degraded` at **200** (not 503) and the API keeps serving;
+  the limiter allowed 20/20 requests that would otherwise have been throttled. Restarted → `ok`.
+- Live Redis keys inspected in-container: `ratelimit:127.0.0.1:GET:/api/v1/incidents` = `2`,
+  TTL 58s.
+- **188 tests passing**, ruff clean; frontend `tsc --noEmit`, `next lint`, `next build` all clean.
+
+**Not done, and not claimed.** The runbook embedder remains the non-semantic `HashingEmbedder`
+(BGE swap agreed but not started), and there is still no LLM streaming.
+
+**Requires operator action.** Google sign-in must be enabled in the Firebase console
+(Authentication → Sign-in method) and `localhost` present under Authorized domains; the popup
+flow could not be exercised here because it requires the operator's own Google credentials.
+
+---
+
+## V2b — Dedicated Firebase project, semantic embeddings, production RAG
+
+### Firebase migration
+Full replacement, not an incremental edit. The old project's service account, project id and all
+six `NEXT_PUBLIC_FIREBASE_*` values were swapped for the dedicated `aegis-ai-detective` project.
+A repo-wide sweep for every old value (project id, API key, app id, sender id, storage bucket,
+auth domain) returns nothing outside two historical journal notes, which were **amended rather
+than erased** — these logs are append-only (CLAUDE.md §19), but a note that had become factually
+false could not be left standing.
+
+Notably the migration touched **no source file**: every credential already lived in gitignored
+env/secret files, which is the design working as intended.
+
+### Environment defect
+The backend venv had been recreated on **Python 3.14** at the old repo path while the installed
+packages were `cp312` builds. The symptom was three apparently unrelated failures —
+`pydantic_core._pydantic_core`, `asyncpg.protocol.protocol`, `xxhash._xxhash` — none of which
+names the actual cause. Rebuilt on 3.12.10 per the Entry 1 pin.
+
+### Embeddings
+`HashingEmbedder` deleted. Local ONNX **BGE `bge-small-en-v1.5`** via `fastembed`, chosen for the
+reasons in the ESD §25 rows: same model quality as sentence-transformers for ~90MB of deps rather
+than ~2.5GB of torch, and no network hop on the retrieval path. Async thread-offload; configurable
+model/dim/batch; a load-time dimension guard because the alternative failure surfaces as an opaque
+pgvector error at INSERT. Query/passage asymmetry honoured (`query_embed` vs `embed`).
+
+### RAG
+Retrieval moved from documents to **chunks**. Structure-aware Markdown chunking (heading trails
+carried into the embedded text), hybrid pgvector + Postgres full-text fused with **RRF**, metadata
+filtering pushed *inside* both retrievers, cross-encoder reranking over an over-fetched pool,
+configurable top-k, section-level citations, and independent degradation at every stage.
+
+### Three real defects found and fixed during implementation
+1. **Silent empty index.** Freshness was decided on the content hash alone. Immediately after
+   chunking landed, re-ingestion logged `changed=false` for all four runbooks and produced **zero
+   chunks** — every RAG query would have returned nothing while ingestion reported success. Fixed
+   by making freshness content AND model AND dimension AND chunks-exist (migration `0006` records
+   index provenance). Regression-tested both ways.
+2. **Short sections dropped.** `min_chars` was applied to whole sections, discarding terse but
+   complete instructions ("Raise the memory limit and redeploy") — the most actionable content in
+   the corpus. Now applied only to fragments produced by splitting.
+3. **Stuttering citations.** Rendered "Runbook: OOM › Runbook: OOM" because a document's H1 is
+   usually also its title. Regression-tested.
+
+### Measured live (real model, real Postgres, real corpus)
+- Firebase Admin initializes against `aegis-ai-detective`; forged token rejected
+  (`InvalidIdTokenError`). `POST /auth/login` → 404.
+- Query *"containers keep dying because they used too much RAM"* → OOM runbook **top-1**, with
+  **zero shared vocabulary** with the document. This is precisely the query the hashing embedder
+  could not serve.
+- Query *"OOMKilled"* → matched by **`semantic,lexical`** together, confirming both retrievers
+  contribute rather than one silently dominating.
+- `service=catalog-service` filter → only chunks tagged for that service.
+- **211 tests passing**, ruff clean.
+
+### Constraint surfaced
+The shipped corpus is four ~650-char documents with no subheadings, so it yields one chunk each.
+Chunking is correct but its value is unexercised at this corpus size; multi-section behaviour is
+covered by unit and integration tests using structured fixtures. A larger corpus is what would
+make the chunking investment visible in production numbers.
+
+---
+
+## V2c/V2d/V2e — AI layer: real agents, LangSmith tracing, evaluation framework
+
+### The audit that started it
+Of seven "agents", **one** called an LLM. Triage was two `set` lookups; Correlation was five
+hardcoded MCP calls in fixed order; Observer was regexes; Communication was `str.format()`;
+Resolution was a dict lookup; the "Supervisor" was static edges with one boolean conditional.
+`langchain-core` and `langsmith` were installed and imported in **zero files**.
+
+A safety carve-out was agreed before any conversion: Observer citation-resolution, redaction,
+the four execution gates, the ingestion severity floor and the state machine stay deterministic.
+A watchdog must not share the failure modes of the thing it watches; an LLM redactor can be
+injected into not redacting; an LLM deciding "is this action permitted" turns an injected log
+line into cluster-write authorisation.
+
+### What became genuinely AI
+- **Triage** (`agents/triage/reasoner.py`) — reasons about customer impact, but **clamped**: it
+  may raise severity above the rule-based floor, never lower it. Escalation is judgment;
+  de-escalation is an attack surface.
+- **Correlation** (`agents/correlation/planner.py`) — a real plan → dispatch → observe → re-plan
+  loop. The model picks tools from a **read-only allowlist** (`tools.py`); Python dispatches, so
+  evidence gathering is structurally incapable of reaching `restart_pod`/`scale_deployment`.
+  Rejected calls are returned *with a reason* — a silently dropped call looks to the model like a
+  tool that returned nothing, and it will reason from that absence.
+- **Supervisor** (`orchestrator/supervisor.py`) — routing is an LLM decision over a genuine graph
+  cycle. `available_steps()` computes the legal set from state; an out-of-set choice is
+  overridden. The model can request another RCA pass; it cannot exceed the revision limit or
+  token budget, reach `resolution` without a validated hypothesis, or refuse to finalize.
+- **Communication**, **Observer critique** — LLM-written / LLM-judged, the critique running
+  *alongside* deterministic validation. It can veto, never rescue: an LLM persuaded by injected
+  text must not approve what the machinery refused.
+
+### Bugs found while building (all regression-tested)
+1. **Alert kind was discarded at ingestion.** `AlertIn.kind` set the provisional severity and was
+   then thrown away, so the graph called `classify_severity(service, "error_rate")` with the kind
+   **hardcoded** — every incident triaged as an error-rate alert whatever fired. Migration `0007`.
+2. **Infinite loop when all sources are down.** Gating correlation on *evidence gathered* rather
+   than *having run* made it the only legal step forever. Hit LangGraph's recursion limit.
+3. **Unbounded "gather more evidence".** `correlation` stayed permanently available after a
+   rejected hypothesis; it is always a plausible next step, so a model favouring it never
+   concludes. Now capped by `correlation_max_invocations`.
+4. **Incidents could finish without finalizing.** The supervisor could route to `resolution`,
+   which had a direct edge to `END` — no state transition, no audit record.
+5. **`CritiqueResult.verdict` was a bare `str`** with allowed values stated only in prose, so
+   structured-output enforcement could not constrain it. Now a `Literal`.
+
+### LangSmith (`core/tracing.py`)
+Traces every graph node, LLM call (model actually used after fallback, tokens, cost, latency,
+repair attempts) and MCP tool call, with one trace per investigation tagged by `incident_id`.
+**Every entry point is a no-op when unconfigured** — an observability outage must not stall an
+investigation. Needs `LANGSMITH_API_KEY`; unset today, so tracing is inert but wired.
+
+### Evaluation framework (`evaluation/`)
+Split by what each metric **costs to run**, which decides where it can live:
+- `retrieval_metrics.py` — hit rate, MRR, precision@k, NDCG@k, forbidden rate. Pure arithmetic:
+  no model, no network, no quota. Gates every commit via
+  `tests/integration/test_retrieval_quality.py`.
+- `ragas_metrics.py` — faithfulness, answer relevancy, context precision. LLM-judged, so
+  on-demand. **RAGAS is an optional extra** (`pip install -e ".[eval]"`), not a runtime
+  dependency: it pulls ~37 packages (pandas, pyarrow, datasets, langchain, openai) and downgrades
+  `fsspec`, which the embedding stack depends on. Shipping that into the production image to
+  support a CI-only measurement is a poor trade.
+
+### Measured, against the REAL shipped corpus (4 runbooks)
+`cases=7 hit_rate=0.86 mrr=0.65 p@k=0.21 ndcg@k=0.70 forbidden=0.14`
+
+The framework immediately found weaknesses the test fixture masked:
+- **`unanswerable` FAILS.** An out-of-domain query ("how do I file an expense report") still
+  returns confident operational runbooks. **`rag_min_score` defaults to `0.0`, so the relevance
+  floor is disabled** and retrieval always returns `k` results however irrelevant — feeding
+  distractors straight into the RCA prompt. This is a real production weakness, not a test
+  artefact.
+- **`latency-symptom` FAILS on the distractor check.** The latency runbook ranks #1 correctly,
+  but the OOM runbook still appears inside top-5.
+- **`deploy-regression` rr=0.25, `availability` rr=0.33** — correct document found, but ranked
+  4th and 3rd. Hit rate hides this; MRR is why it is measured.
+- `p@k=0.21` is expected at k=5 on a 4-document corpus (at most one document is relevant), and
+  is not meaningful until the corpus grows.
+
+**These numbers are the current honest baseline, not a target.** They are recorded so the next
+change to chunking, fusion weights, the embedder or the reranker can be judged against them.
