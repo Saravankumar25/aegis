@@ -51,10 +51,22 @@ from providers.errors import (
     RateLimited,
 )
 from providers.gemini_schema import to_gemini_schema
+from providers.keypool import KeyPool
 from providers.parsing import strip_code_fences
 from providers.structured import complete_structured_with_repair
 
 __all__ = ["GeminiProvider"]
+
+
+class KeyQuotaExhausted(Exception):
+    """One key hit its per-day cap. Internal: never escapes a provider call.
+
+    Distinct from `RateLimited` because the recovery differs — a throttled key is worth
+    retrying in seconds, a capped key is not worth retrying today — and distinct from
+    `DailyQuotaExhausted` because that reports the *pool* being spent, which is what an
+    operator needs to act on.
+    """
+
 
 # finishReason values that mean "this response is unusable", as opposed to a normal
 # stop. MAX_TOKENS is handled separately because it is recoverable with more budget.
@@ -88,7 +100,7 @@ class GeminiProvider(LLMProvider):
         self._max_truncation_budget = settings.llm_max_tokens_on_truncation
         self._structured_repair_attempts = settings.llm_structured_repair_attempts
         self._http = http or httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
-        self._key_cursor = 0
+        self._pool = KeyPool(self._keys)
         self._log = get_logger(component="llm.gemini")
 
     def _models_for(self, agent: str) -> list[str]:
@@ -127,25 +139,23 @@ class GeminiProvider(LLMProvider):
 
     def _headers(self, key_index: int) -> dict[str, str]:
         return {
-            "x-goog-api-key": self._keys[key_index % len(self._keys)],
+            "x-goog-api-key": self._pool.key(key_index),
             "Content-Type": "application/json",
         }
 
     def _classify_error(self, status: int, body: str, model: str, key_index: int) -> Exception:
         """Map an HTTP failure onto the shared taxonomy.
 
-        The daily-cap distinction matters operationally: `RESOURCE_EXHAUSTED` with a
-        per-day quota metric will not clear by rotating keys or waiting a moment, so
-        it must not be reported as ordinary throttling.
+        `KeyQuotaExhausted` is raised per *key*, not per call. Gemini keys carry
+        independent per-project daily quotas, so one capped key says nothing about the
+        others — the caller marks that key and moves on, and only reports
+        `DailyQuotaExhausted` once every key is capped. (The OpenRouter provider is
+        deliberately different: its keys bill against one account, so the first daily
+        cap really is terminal for all of them.)
         """
         lowered = body.lower()
         if status == 429 and ("per day" in lowered or "perday" in lowered):
-            return DailyQuotaExhausted(
-                "Gemini daily quota is exhausted for every configured key. This does "
-                "not clear on retry: wait for the quota reset, enable billing on the "
-                "Google Cloud project, or point GEMINI_MODEL_* at a model with "
-                "remaining capacity."
-            )
+            return KeyQuotaExhausted(f"{model} key#{key_index % len(self._keys)} daily cap")
         if status in (401, 403, 429):
             return RateLimited(f"{model} key#{key_index % len(self._keys)} -> {status}")
         if status >= 500:
@@ -202,14 +212,21 @@ class GeminiProvider(LLMProvider):
         prompt_ref: str | None = None,
         json_schema: dict[str, Any] | None = None,
     ) -> LLMResult:
-        """Call the model, walking the model × key matrix until one answers."""
+        """Call the model, walking the model × key matrix until one answers.
+
+        Keys are ordered by the pool (last-successful first, cooling-down keys demoted,
+        capped keys skipped) and re-ordered on every model, so a key that recovers part
+        way through is picked up by the next model rather than being written off for the
+        whole call.
+        """
         attempts = 0
         started = time.perf_counter()
         budget = max(max_tokens, self._max_tokens)
 
         for model in self._models_for(agent):
-            for offset in range(len(self._keys)):
-                key_index = self._key_cursor + offset
+            if self._pool.all_quota_exhausted():
+                break
+            for key_index in self._pool.order():
                 attempts += 1
                 try:
                     body = await self._post(
@@ -220,11 +237,25 @@ class GeminiProvider(LLMProvider):
                         system=system,
                         json_schema=json_schema,
                     )
-                except DailyQuotaExhausted:
-                    # Rotating keys/models cannot help: the cap is account-wide.
-                    self._log.error("llm_daily_quota_exhausted", agent=agent)
-                    raise
+                except KeyQuotaExhausted as exc:
+                    # This key is capped for the day; the others may be fine.
+                    self._pool.mark_quota_exhausted(key_index)
+                    self._log.warning(
+                        "llm_key_quota_exhausted",
+                        detail=str(exc),
+                        agent=agent,
+                        **self._pool.snapshot(),
+                    )
+                    if self._pool.all_quota_exhausted():
+                        self._log.error("llm_daily_quota_exhausted", agent=agent)
+                        raise DailyQuotaExhausted(
+                            f"all {len(self._keys)} Gemini keys have hit their daily "
+                            "quota. This does not clear on retry: wait for the quota "
+                            "reset, add a key from another project, or enable billing."
+                        ) from exc
+                    continue
                 except RateLimited as exc:
+                    self._pool.mark_throttled(key_index)
                     self._log.warning("llm_throttled", detail=str(exc), agent=agent)
                     continue
                 except (httpx.HTTPError, OSError) as exc:
@@ -277,7 +308,7 @@ class GeminiProvider(LLMProvider):
                     continue
 
                 usage = body.get("usageMetadata") or {}
-                self._key_cursor = key_index
+                self._pool.mark_success(key_index)
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 tokens = int(usage.get("totalTokenCount") or 0)
                 self._log.info(
@@ -302,11 +333,13 @@ class GeminiProvider(LLMProvider):
                     prompt_ref=prompt_ref,
                 )
 
-        self._log.error("llm_all_models_exhausted", agent=agent, attempts=attempts)
+        self._log.error(
+            "llm_all_models_exhausted", agent=agent, attempts=attempts, **self._pool.snapshot()
+        )
         raise ProviderExhausted(
             f"every configured Gemini model and key was unavailable for agent '{agent}' "
-            f"after {attempts} attempts; the incident is left for the retry sweep "
-            f"rather than answered with fabricated reasoning"
+            f"after {attempts} attempts ({self._pool.snapshot()}); the incident is left "
+            f"for the retry sweep rather than answered with fabricated reasoning"
         )
 
     async def complete_structured[StructuredT: BaseModel](
@@ -361,8 +394,7 @@ class GeminiProvider(LLMProvider):
         last_error = "no attempt was made"
 
         for model in self._models_for(agent):
-            for offset in range(len(self._keys)):
-                key_index = self._key_cursor + offset
+            for key_index in self._pool.order():
                 emitted = False
                 try:
                     async with self._http.stream(
@@ -377,7 +409,7 @@ class GeminiProvider(LLMProvider):
                             raise self._classify_error(
                                 response.status_code, response.text, model, key_index
                             )
-                        self._key_cursor = key_index
+                        self._pool.mark_success(key_index)
                         async for line in response.aiter_lines():
                             if not line.startswith("data:"):
                                 continue
@@ -392,7 +424,7 @@ class GeminiProvider(LLMProvider):
                             if delta:
                                 emitted = True
                                 yield delta
-                except (RateLimited, httpx.HTTPError, OSError) as exc:
+                except (KeyQuotaExhausted, RateLimited, httpx.HTTPError, OSError) as exc:
                     last_error = str(exc)
                     if emitted:
                         # Mid-stream failure. Stop rather than splice.
@@ -400,6 +432,15 @@ class GeminiProvider(LLMProvider):
                             "llm_stream_aborted", model=model, agent=agent, error=last_error
                         )
                         raise
+                    if isinstance(exc, KeyQuotaExhausted):
+                        self._pool.mark_quota_exhausted(key_index)
+                        if self._pool.all_quota_exhausted():
+                            raise DailyQuotaExhausted(
+                                f"all {len(self._keys)} Gemini keys have hit their daily "
+                                "quota; streaming cannot proceed"
+                            ) from exc
+                    elif isinstance(exc, RateLimited):
+                        self._pool.mark_throttled(key_index)
                     self._log.warning(
                         "llm_stream_retry", model=model, agent=agent, error=last_error
                     )

@@ -107,18 +107,67 @@ async def test_exhaustion_raises_rather_than_fabricating():
         await _provider(handler).complete("p", agent="triage")
 
 
-async def test_daily_quota_is_distinguished_and_stops_rotating():
-    """A per-day cap cannot be escaped by trying another key; retrying wastes time."""
-    calls = 0
+_DAILY_CAP = '{"error":{"message":"Quota exceeded: requests per day"}}'
+
+
+async def test_one_key_over_daily_cap_rotates_to_the_others():
+    """Gemini keys carry independent per-project quotas.
+
+    Treating the first capped key as terminal — which is correct for OpenRouter, whose
+    keys bill against one account — stranded every remaining key and reported the system
+    as out of capacity while most of it was idle.
+    """
+    used: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(429, text='{"error":{"message":"Quota exceeded: requests per day"}}')
+        key = request.headers["x-goog-api-key"]
+        used.append(key)
+        if key == KEYS[0]:
+            return httpx.Response(429, text=_DAILY_CAP)
+        return httpx.Response(200, json=_ok("answered by a key with quota left"))
 
-    with pytest.raises(DailyQuotaExhausted):
+    result = await _provider(handler).complete("p", agent="triage")
+    assert result.text == "answered by a key with quota left"
+    assert used[0] == KEYS[0] and used[1] == KEYS[1]
+
+
+async def test_daily_quota_raised_only_when_every_key_is_capped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text=_DAILY_CAP)
+
+    with pytest.raises(DailyQuotaExhausted, match="all 3 Gemini keys"):
         await _provider(handler).complete("p", agent="triage")
-    assert calls == 1, "a daily cap must fail immediately, not walk the key×model matrix"
+
+
+async def test_capped_key_is_not_retried_on_the_next_model():
+    """Once a key is known capped, spending an attempt on it per model is pure latency."""
+    attempts: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers["x-goog-api-key"]
+        attempts.append((_model_of(request), key))
+        if key == KEYS[0]:
+            return httpx.Response(429, text=_DAILY_CAP)
+        return httpx.Response(503, text="high demand")
+
+    provider = _provider(handler)
+    with pytest.raises(ProviderExhausted):
+        await provider.complete("p", agent="triage")
+
+    capped_attempts = [a for a in attempts if a[1] == KEYS[0]]
+    assert len(capped_attempts) == 1, (
+        f"the capped key was retried {len(capped_attempts)} times; it should be skipped "
+        "after the first daily-cap response"
+    )
+
+
+async def test_capped_key_is_reused_after_a_success_proves_it_wrong():
+    """State is a cache, not a verdict: a key that answers is healthy by definition."""
+    provider = _provider(lambda r: httpx.Response(200, json=_ok("fine")))
+    provider._pool.mark_quota_exhausted(0)
+    assert 0 not in provider._pool.order()
+    provider._pool.mark_success(0)
+    assert provider._pool.order()[0] == 0
 
 
 # --- refusals must never become answers ---------------------------------------------------

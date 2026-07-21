@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
+import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -46,6 +48,17 @@ def tracing_enabled() -> bool:
         _enabled = False
         return False
     try:
+        # The SDK's `traceable`/`trace` helpers read the *process environment*, not any
+        # Client instance handed to them, and they no-op unless LANGSMITH_TRACING is
+        # truthy. pydantic-settings loads `.env` into a settings object without exporting
+        # it, so without this bridge every span silently did nothing — the code looked
+        # correctly wired, `tracing_enabled()` returned True, and no run was ever
+        # submitted. Set before importing langsmith so the module reads final values.
+        os.environ.setdefault("LANGSMITH_TRACING", "true")
+        os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+        os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+
         from langsmith import Client
 
         _client = Client(
@@ -58,6 +71,21 @@ def tracing_enabled() -> bool:
         _log.warning("langsmith_unavailable", error=str(exc))
         _enabled = False
     return _enabled
+
+
+def flush(timeout_seconds: float = 10.0) -> None:
+    """Block until queued runs are submitted.
+
+    The SDK batches submissions on a background thread, so a short-lived process — the
+    worker finishing an incident, a CLI verification run — can exit with traces still
+    queued and drop them. Long-running servers do not need this; scripts do.
+    """
+    if not tracing_enabled() or _client is None:
+        return
+    try:
+        _client.flush()
+    except Exception as exc:  # noqa: BLE001 — a failed flush must not fail the caller
+        _log.warning("langsmith_flush_failed", error=str(exc))
 
 
 def traced[F: Callable[..., Any]](name: str, run_type: str = "chain") -> Callable[[F], F]:
@@ -83,18 +111,43 @@ def traced[F: Callable[..., Any]](name: str, run_type: str = "chain") -> Callabl
 
 @contextlib.contextmanager
 def trace_span(name: str, *, run_type: str = "chain", **metadata: Any) -> Iterator[None]:
-    """Trace a block that is not a whole function (a tool call, one ensemble pass)."""
+    """Trace a block that is not a whole function (a tool call, one ensemble pass).
+
+    Enter and exit are guarded individually, and `yield` happens exactly once on every
+    path. The obvious shape — `try: with trace(...): yield / except Exception: yield` —
+    is a real bug rather than a style preference: an exception raised by the *body* is
+    thrown into the generator at the yield, caught by that `except`, and answered with a
+    second yield, which contextlib rejects with `RuntimeError: generator didn't stop
+    after throw()`. The caller's real exception is destroyed and replaced by that
+    RuntimeError, so `ProviderExhausted` stops matching `except ProviderExhausted` and
+    the degradation path silently stops working — but only once tracing is switched on,
+    which is why it survived until LangSmith was first genuinely enabled.
+
+    `sys.exc_info()` is forwarded to `__exit__` so a failing block is recorded as a
+    failed span rather than a successful one.
+    """
     if not tracing_enabled():
         yield
         return
+
+    span: Any | None = None
     try:
         from langsmith.run_helpers import trace
 
-        with trace(name=name, run_type=run_type, metadata=metadata):
-            yield
-    except Exception as exc:  # noqa: BLE001 — never let a trace failure surface to the caller
+        span = trace(name=name, run_type=run_type, metadata=metadata)
+        span.__enter__()
+    except Exception as exc:  # noqa: BLE001 — tracing must not break the traced code
         _log.warning("langsmith_span_failed", name=name, error=str(exc))
+        span = None
+
+    try:
         yield
+    finally:
+        if span is not None:
+            try:
+                span.__exit__(*sys.exc_info())
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("langsmith_span_exit_failed", name=name, error=str(exc))
 
 
 def annotate(**fields: Any) -> None:
