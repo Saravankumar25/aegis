@@ -21,10 +21,17 @@ _EVIDENCE_BLOCK = re.compile(
 )
 
 # (category, [keywords], base weight). Order = default priority when weights tie.
+# Keywords are deliberately specific: bare "restart" would match the healthy
+# "restarts=0" in every pod summary, and "commit"/"deploy" would match the
+# "no code changes found" message — both would fabricate signal from absence.
 _SIGNALS: list[tuple[str, list[str], float]] = [
-    ("deploy_regression", ["deploy", "commit", "merged", "feat:", "fix:", "rollback"], 1.0),
-    ("resource_exhaustion", ["oomkilled", "crashloopbackoff", "restart", "memory"], 0.9),
-    ("error_spike", ['status="500"', "5xx", "error rate", "errors", "http 500"], 0.7),
+    ("deploy_regression", ["commit ", "deployed", "merged", "feat:", "fix:", "rollback"], 1.0),
+    (
+        "resource_exhaustion",
+        ["oomkilled", "crashloopbackoff", "out of memory", "memory limit", "back-off"],
+        0.9,
+    ),
+    ("error_spike", ['status="500"', "status=500", "5xx", "error rate", "http 500"], 0.7),
     ("latency_degradation", ["latency", "p99", "slow", "timeout"], 0.6),
 ]
 

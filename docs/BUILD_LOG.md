@@ -422,3 +422,24 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
   validated citations), **poisoned-logs pipeline** (observer rejects once, revision strips the
   evidence, run still completes), all-sources-down (completes with ≥3 documented gaps, category
   unknown).
+
+---
+
+## Milestone 7 — Eval harness
+
+**Status:** complete.
+
+- **Corpus:** 12 hand-crafted synthetic incidents (`eval/synthetic_incidents/*.json`) covering all
+  four root-cause categories across all three Meridian services, plus adversarial cases: mixed
+  signals (OOM despite a fresh deploy), an unavailable evidence source (github down → gap), and
+  hostile injected logs (screened by the observer, then correctly attributed on revision).
+- **Harness** (`backend/tests/eval/test_rca_accuracy.py`): runs the *real* correlation → RCA →
+  observer path (FixtureGateway + stub, no DB, token-free → runs per-PR in CI per ESD §23) and
+  enforces PRD 9A: **accuracy ≥85%** (currently 12/12) and **hallucination rate <5%** (currently
+  0 — every claim's citation must resolve). Per-scenario test ensures each yields ≥1 cited
+  hypothesis (FR-3.2).
+- **Fixes surfaced by eval design:** stub keywords sharpened (bare "restart" matched the healthy
+  `restarts=0` summary; "commit"/"deploy" matched the "no commits found" message — absence of
+  change could fabricate a change signal). Collector now phrases "repo quiet" without
+  change-keywords. This is exactly the class of bug the harness exists to catch.
+- 114 tests passing total.

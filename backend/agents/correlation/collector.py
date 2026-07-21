@@ -136,12 +136,14 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
                 ),
             )
         else:
+            # Phrased without change-related keywords so absence of changes can never be
+            # pattern-matched into a change-related signal downstream.
             store.add(
                 type_=EvidenceType.diff,
                 source="github.get_recent_commits",
                 ref="github/commits/recent",
-                text=f"no commits in the last {settings.deploy_lookback_hours}h "
-                f"(deploy regression unlikely)",
+                text=f"repository quiet for the last {settings.deploy_lookback_hours}h; "
+                f"nothing shipped in the window",
             )
     else:
         store.note_gap("github.get_recent_commits", commits_result.get("error") or "unavailable")
