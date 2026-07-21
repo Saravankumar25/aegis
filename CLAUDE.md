@@ -602,3 +602,62 @@ Each entry must include:
   from one still in flight. LangSmith chain runs report `tokens=0` — per-run token attribution is
   not propagating. `/health` and `/metrics` remain at `/api/v1/*` rather than the paths ESD §7
   documents, and `/docs`, `/redoc` and `/openapi.json` are publicly exposed.
+
+### 2026-07-21 — Entry 15/16: Phase 7 — the AI reasoning loop completed (V2h)
+- **Resolution is now genuine reasoning under deterministic safety control.** Action selection
+  was `dict[category] -> action`: it could not weigh evidence, could not decline when evidence
+  was thin, could not choose between two plausible actions, and — because `resource_exhaustion`
+  mapped to `scale_deployment` — proposed scaling for a memory leak as readily as for real
+  saturation. The model now chooses the action, its parameters and its confidence, and states
+  which alternatives it rejected; that justification is what an approver reads.
+- **New convention — the model may choose *what*, never *how much authority*.** An action outside
+  the catalog is refused rather than coerced to the nearest match; **tier is read from the catalog
+  after selection**, so a model cannot label a destructive action Tier-1 and route itself around
+  human approval; parameters are clamped to declared bounds ("scale by 500" → the maximum, "scale
+  by -5" cannot scale a service down). `ResolutionPlan` has no tier/shadow/expiry/blast_radius
+  field at all, asserted structurally by test rather than by prompt wording. The four execution
+  gates are untouched and unaware of the planner.
+- **Memory is now judgement, not recency.** `draft_summary` assigned `symptom = incident.title`
+  (what a *monitor* saw, not what an engineer would search by); `recall` returned the three most
+  recent approved memories. The agent now writes the lesson and judges relevance over a wider
+  candidate pool. **The approval gate did not move**: `approved_by IS NOT NULL` stays in SQL, the
+  model only ever narrows that set, and selection is by bounds-checked *index* — a hallucinated
+  choice yields fewer memories, never different ones. Negative indices are explicitly tested
+  because Python would otherwise resolve `-1` to the last candidate.
+- **Explainability on every reasoning agent (ESD §5).** Structured LLM output covering inputs,
+  evidence, tools, retrieved passages, reasoning, alternatives *and why they were rejected*,
+  confidence, remaining uncertainty and recommended next actions — surfaced as a typed API field
+  rather than leaving the UI to reach into `structured_output`. `uncertainty` is **required**,
+  because optional uncertainty is what makes explanations read as uniformly confident.
+- **New convention — explanation is never load-bearing.** It runs after the agent's real work,
+  every failure path records an absence, and no exception type escapes. An investigation that
+  cannot explain itself still investigates.
+- **Evidence pollution found by live execution, not by tests.** `list_alerts` was unscoped, so a
+  `checkout-service` investigation received `etcdMembersDown` from `kube-system` as evidence and
+  RCA twice built its hypothesis around a control-plane failure. The Observer rejected both — so
+  nothing wrong was published, but two whole investigations were spent on a distractor *supplied
+  by the evidence layer*. Now namespace-scoped by default with `all_namespaces` as the explicit
+  opt-out: the caller omitting the argument is a model choosing tools, so the safe scope must be
+  the default.
+- **The exhaustion taxonomy only knew about memory.** `resource_exhaustion` markers covered
+  OOM/crashloop/evicted/cpu-throttle, so evidence reading `pool exhausted, 0 idle connections`
+  failed category support and a **correct** hypothesis was rejected for citing the wrong *kind* of
+  resource. Added high-precision handle-exhaustion markers (connection pools, file descriptors,
+  thread pools, queue full); a test asserts healthy and generic evidence is still rejected, so the
+  widening did not turn the guard into a rubber stamp.
+- **The Observer caught a defect in the test environment itself.** Error logs read "timed out
+  after 41ms" — the simulator was using the simulated request latency as the timeout duration.
+  The model refused an upstream-latency hypothesis on the grounds that the durations contradicted
+  it, which was correct: 41ms is not a timeout. Fixed to emit a realistic client threshold with
+  jitter. Worth recording because the reasoning layer diagnosed the *evidence* layer.
+- **Verified live end-to-end:** observer-approved hypothesis (connection pool exhaustion) →
+  Resolution chose `scale_deployment` at 0.9 confidence having rejected `restart_pod` ("pods are
+  running and not in a crash loop") and `rollback_deploy` ("no evidence a recent deployment caused
+  this" — declining to blame a deploy without deploy evidence, the exact failure mode the prompts
+  exist to prevent) → tier 2 from the catalog → awaiting human approval. Explanations persisted
+  for all five agents. **387 tests pass**; ruff clean.
+- **Still open, explicitly not done:** no `escalated` state (an escalated incident still sits in
+  `hypothesis_formed`); RAG relevance floor still `0.0` and the `unanswerable` golden case still
+  fails; RAGAS/DeepEval still never executed; LangSmith chain runs still report `tokens=0`; RCA
+  still uses `complete()` rather than `complete_structured()`; the frontend was deliberately out
+  of scope this phase and does not yet render the new explanations.
