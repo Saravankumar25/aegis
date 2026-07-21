@@ -84,3 +84,22 @@ class RunbookSource(StrEnum):
 
     internal = "internal"
     postmortem_corpus = "postmortem_corpus"
+
+
+class RemediationStatus(StrEnum):
+    """Lifecycle of a remediation action (ESD §6, remediation_actions)."""
+
+    proposed = "proposed"
+    leased = "leased"
+    approved = "approved"
+    executed = "executed"
+    rejected = "rejected"
+    failed = "failed"
+    rolled_back = "rolled_back"
+
+
+class ApprovalDecision(StrEnum):
+    """Human decision on a Tier-2 proposal (ESD §6, approvals)."""
+
+    approved = "approved"
+    rejected = "rejected"

@@ -34,9 +34,7 @@ def _load_scenarios() -> list[dict]:
 
 
 def _gateway(scenario: dict) -> FixtureGateway:
-    fixtures = {
-        tuple(key.split("::", 1)): value for key, value in scenario["fixtures"].items()
-    }
+    fixtures = {tuple(key.split("::", 1)): value for key, value in scenario["fixtures"].items()}
     return FixtureGateway(fixtures)
 
 
@@ -76,8 +74,9 @@ async def _run(scenario: dict) -> dict:
 async def test_rca_accuracy_meets_threshold():
     rows = [await _run(s) for s in _load_scenarios()]
     accuracy = sum(r["correct"] for r in rows) / len(rows)
-    misses = [f"{r['name']}: expected {r['expected']}, got {r['got']}" for r in rows
-              if not r["correct"]]
+    misses = [
+        f"{r['name']}: expected {r['expected']}, got {r['got']}" for r in rows if not r["correct"]
+    ]
     assert accuracy >= ACCURACY_THRESHOLD, (
         f"RCA accuracy {accuracy:.0%} below {ACCURACY_THRESHOLD:.0%}; misses: {misses}"
     )

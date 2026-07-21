@@ -455,3 +455,62 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
 - **Auth**: login page; httpOnly cookies ride on `credentials: "include"` fetches and
   `EventSource(withCredentials)`; the frontend never touches a token (ESD §5/§8); 401 → /login.
 - `next build` + `next lint` clean.
+
+---
+
+# V1.5 — Safe Autonomous Action
+
+## V1.5 architecture review (pre-implementation, CLAUDE.md §2)
+
+Triggers: **new autonomous action types** (restart pod, scale deployment), **new auth surfaces**
+(approvals, breaker clear, kill switch), **new external dep** (Slack webhook; PagerDuty mocked).
+
+- **Reliability:** every remediation is idempotency-keyed (`remediation_actions.idempotency_key`
+  unique) so a retried execution cannot double-fire. Action execution goes through the same MCP
+  retry/degradation envelope; a failed action is `status=failed` with the compensating action
+  *offered*, never auto-fired (ESD §12 — a failed action may not need undoing).
+- **Safety (the point of V1.5):** four independent, layered gates in front of ANY execution:
+  (1) **kill switch** — persistent DB flag, checked immediately before every execution, engaged =
+  nothing executes anywhere; (2) **resource lease** — partial unique index in Postgres enforces
+  one active lease per target at the database level, not in application code; (3) **circuit
+  breakers** — per-service Tier-1 rate limit (3/h, FR-4.2: excess forced to Tier-2) and a global
+  mass-action breaker (trips when system-wide Tier-1 executions in a rolling window exceed the
+  threshold — one systemic root cause must not produce an unbounded action wave, ESD §17);
+  (4) **tier gates** — Tier-1 allowlist auto-executes only when the Observer validated the
+  hypothesis AND blast radius is within limits (FR-8.3); Tier-2 requires a recorded human
+  approval (server-side role check); Tier-3 never executes. Tier-1 additionally ships in
+  **shadow mode by default** (logs what it *would* do) until explicitly enabled.
+- **Security:** write-capable k8s credential is a *separate* ServiceAccount
+  (`aegis-k8s-mcp-writer`) with exactly `delete` on pods and `patch` on deployments/scale in the
+  meridian namespace — the read-only MVP SA is untouched, and the writer token is only mounted
+  into the k8s MCP server, never the worker (NFR-Security). Approval/clear/kill endpoints check
+  role server-side (`on_call_engineer`/`admin`; kill switch + clear = `admin`).
+  Slack webhook URL is env-only; messages are plain-English summaries already redacted upstream.
+- **Scalability/operational:** breaker events and remediation actions are ordinary OLTP rows;
+  audit_log absorbs the write volume via existing partitioning. Proposal expiry
+  (`expires_at`, default 30 min) prevents a stale approval queue from becoming a standing-order
+  risk: an expired proposal cannot be approved or executed.
+
+## V1.5a — Safety substrate: leases, breakers, kill switch (+ all V1.5 tables)
+
+**Status:** complete.
+
+- **Migration 0003**: `remediation_actions` (unique `idempotency_key`; `compensating_action`
+  NOT NULL — no action without a documented undo, CLAUDE.md §17; `shadow` bool for Tier-1 shadow
+  mode; `reasoning` NOT NULL per FR-4.3), `resource_leases` with the **partial unique index**
+  `(type,id) WHERE released_at IS NULL`, `action_circuit_breaker_events`, `approvals`,
+  `memory_summaries` (compound `(service_name, incident_type)` index, FR-7.3), and new
+  `system_flags` (kill switch state — ESD §6 updated). Gotcha: inline `sa.Enum` in
+  `create_table` re-issues CREATE TYPE → use `postgresql.ENUM(create_type=False)` + explicit
+  create.
+- **safety/resource_lease**: `acquire_lease` = INSERT … ON CONFLICT (partial index) DO NOTHING →
+  None on contention; the database is the arbiter. `release` idempotent.
+- **safety/circuit_breaker**: `effective_tier` promotes Tier-1→Tier-2 past 3 executions/h/service
+  (FR-4.2 — narrows autonomy instead of dropping the action); global window row counts all
+  Tier-1 executions, trips at threshold (default 10/10min), admin-only clear.
+- **safety/kill_switch**: upserted `system_flags` row; engaged = nothing executes anywhere.
+- **Settings**: all thresholds in `core/config.py` under a "safety-relevant, call out in PR"
+  banner (CLAUDE.md §15). `resolution_shadow_mode` **defaults ON**.
+- **Tests (117 passing):** second lease refused + reacquire after release; **4-way concurrent
+  lease race → exactly one winner** (real DB race); per-service rate-limit promotion with
+  cross-service isolation; global breaker trip + admin clear; kill-switch round-trip.

@@ -9,6 +9,14 @@ from db.models.audit import AuditLog
 from db.models.auth import RefreshSession
 from db.models.base import Base
 from db.models.incident import Incident, IncidentStateTransition
+from db.models.remediation import (
+    ActionCircuitBreakerEvent,
+    Approval,
+    MemorySummary,
+    RemediationAction,
+    ResourceLease,
+    SystemFlag,
+)
 from db.models.runbook import Runbook
 from db.models.user import User
 
@@ -23,4 +31,10 @@ __all__ = [
     "User",
     "AuditLog",
     "RefreshSession",
+    "RemediationAction",
+    "ResourceLease",
+    "ActionCircuitBreakerEvent",
+    "Approval",
+    "MemorySummary",
+    "SystemFlag",
 ]

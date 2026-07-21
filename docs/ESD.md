@@ -210,6 +210,10 @@ Partial unique index on `(target_resource_type, target_resource_id) WHERE releas
 `id · incident_id (fk) · service_name · incident_type · symptom · root_cause · fix · outcome · approved_by (fk users) · created_at`
 Composite index on `(service_name, incident_type)` — the compound scoping key from the earlier design correction.
 
+**system_flags** *(added in V1.5a)*
+`key (pk) · value (jsonb) · updated_at`
+Durable system-wide flags; the `kill_switch` row is the kill switch itself (FR-5.3) — persistent across restarts, shared by all workers, checked immediately before any execution.
+
 **users**
 `id · email · hashed_password · role(admin|on_call_engineer|viewer) · created_at`
 

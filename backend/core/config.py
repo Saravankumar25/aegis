@@ -68,6 +68,22 @@ class Settings(BaseSettings):
     mcp_retry_base_delay_seconds: float = Field(default=0.2)
     mcp_http_timeout_seconds: float = Field(default=10.0)
 
+    # --- V1.5 safety thresholds (FR-4.2, FR-12, ESD §17). Changing any of these is a
+    # safety-relevant change and must be called out in the PR (CLAUDE.md §15). ---
+    tier1_rate_limit_per_hour: int = Field(default=3, description="FR-4.2 per-service cap.")
+    breaker_window_minutes: int = Field(default=10)
+    breaker_max_tier1_in_window: int = Field(
+        default=10, description="Global mass-action trip threshold."
+    )
+    proposal_expiry_minutes: int = Field(default=30)
+    # Tier-1 shadow mode: log what WOULD execute without touching infrastructure.
+    # Deliberately ON by default; flipping it off is an explicit operator decision.
+    resolution_shadow_mode: bool = Field(default=True)
+    max_blast_radius_dependents: int = Field(
+        default=1, description="FR-8.3: Tier-1 auto-exec only if dependents <= this."
+    )
+    slack_webhook_url: str | None = Field(default=None)
+
     # --- API surface (ESD §7) ---
     cors_origins: str = Field(
         default="http://localhost:3000",

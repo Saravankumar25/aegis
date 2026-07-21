@@ -41,10 +41,12 @@ packages = [
     "core",
     "db",
     "mcp_servers",
+    "memory",
     "orchestrator",
     "providers",
     "rag",
     "redaction",
+    "safety",
     "worker",
 ]
 

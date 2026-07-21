@@ -75,7 +75,9 @@ async def session(db_url: str) -> AsyncIterator[AsyncSession]:
         await conn.execute(
             text(
                 "TRUNCATE incidents, incident_state_transitions, agent_steps, agent_messages, "
-                "evidence_citations, refresh_sessions, users, runbooks, audit_log CASCADE"
+                "evidence_citations, refresh_sessions, users, runbooks, audit_log, "
+                "remediation_actions, resource_leases, action_circuit_breaker_events, "
+                "approvals, memory_summaries, system_flags CASCADE"
             )
         )
     async with maker() as s:
