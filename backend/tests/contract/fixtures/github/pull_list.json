@@ -1,0 +1,11 @@
+[
+  {
+    "number": 42,
+    "title": "Raise checkout cache TTL",
+    "state": "closed",
+    "user": { "login": "Saravankumar25" },
+    "merged_at": "2026-07-21T08:44:00Z",
+    "updated_at": "2026-07-21T08:44:10Z",
+    "head": { "ref": "feat/cache-ttl" }
+  }
+]

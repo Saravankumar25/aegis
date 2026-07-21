@@ -1,0 +1,30 @@
+{
+  "kind": "DeploymentList",
+  "apiVersion": "apps/v1",
+  "items": [
+    {
+      "metadata": { "name": "checkout-service", "namespace": "meridian" },
+      "spec": {
+        "replicas": 2,
+        "template": {
+          "spec": {
+            "containers": [{ "name": "checkout-service", "image": "meridian/simulator:latest" }]
+          }
+        }
+      },
+      "status": { "readyReplicas": 2, "availableReplicas": 2 }
+    },
+    {
+      "metadata": { "name": "payment-service", "namespace": "meridian" },
+      "spec": {
+        "replicas": 2,
+        "template": {
+          "spec": {
+            "containers": [{ "name": "payment-service", "image": "meridian/simulator:latest" }]
+          }
+        }
+      },
+      "status": { "readyReplicas": 1, "availableReplicas": 1 }
+    }
+  ]
+}

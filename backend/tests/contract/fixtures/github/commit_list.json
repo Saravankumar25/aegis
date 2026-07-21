@@ -1,0 +1,16 @@
+[
+  {
+    "sha": "9f1c2e3d4b5a69788c7d6e5f4a3b2c1d0e9f8a7b",
+    "commit": {
+      "message": "feat: raise checkout cache TTL to 300s",
+      "author": { "name": "Saravan Kumar", "date": "2026-07-21T08:45:00Z" }
+    }
+  },
+  {
+    "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "commit": {
+      "message": "fix: retry payment webhook on 502",
+      "author": { "name": "Saravan Kumar", "date": "2026-07-21T08:10:00Z" }
+    }
+  }
+]

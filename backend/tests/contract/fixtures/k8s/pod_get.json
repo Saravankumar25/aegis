@@ -1,0 +1,28 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "payment-service-7c9d4f5b6a-q8w3e",
+    "namespace": "meridian",
+    "labels": { "app": "payment-service", "app.kubernetes.io/part-of": "meridian" }
+  },
+  "spec": { "nodeName": "aegis-control-plane" },
+  "status": {
+    "phase": "Running",
+    "startTime": "2026-07-21T08:00:00Z",
+    "conditions": [
+      { "type": "Ready", "status": "False" },
+      { "type": "ContainersReady", "status": "False" }
+    ],
+    "containerStatuses": [
+      {
+        "name": "payment-service",
+        "ready": false,
+        "restartCount": 7,
+        "image": "meridian/simulator:latest",
+        "state": { "waiting": { "reason": "CrashLoopBackOff" } },
+        "lastState": { "terminated": { "reason": "OOMKilled", "exitCode": 137 } }
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "EventList",
+  "apiVersion": "v1",
+  "items": [
+    {
+      "type": "Warning",
+      "reason": "BackOff",
+      "message": "Back-off restarting failed container payment-service in pod payment-service-7c9d4f5b6a-q8w3e",
+      "involvedObject": { "kind": "Pod", "name": "payment-service-7c9d4f5b6a-q8w3e" },
+      "count": 12,
+      "lastTimestamp": "2026-07-21T09:14:00Z"
+    },
+    {
+      "type": "Normal",
+      "reason": "Pulled",
+      "message": "Container image \"meridian/simulator:latest\" already present on machine",
+      "involvedObject": { "kind": "Pod", "name": "checkout-service-6d5f8b9c7d-x2k4p" },
+      "count": 1,
+      "lastTimestamp": "2026-07-21T08:00:03Z"
+    }
+  ]
+}

@@ -40,3 +40,7 @@ Thumbs.db
 # Local data
 *.sqlite3
 pgdata/
+
+# k8s MCP ServiceAccount credential files (minted by infra/gen-mcp-credentials.sh; never commit)
+infra/.k8s-mcp-token
+infra/.k8s-mcp-ca.crt

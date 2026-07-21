@@ -1,0 +1,20 @@
+{
+  "status": "success",
+  "data": {
+    "alerts": [
+      {
+        "labels": {
+          "alertname": "HighErrorRate",
+          "service": "checkout-service",
+          "severity": "critical"
+        },
+        "annotations": {
+          "summary": "checkout-service 5xx rate above 20% for 2m"
+        },
+        "state": "firing",
+        "activeAt": "2026-07-21T09:10:00Z",
+        "value": "6.7e-01"
+      }
+    ]
+  }
+}

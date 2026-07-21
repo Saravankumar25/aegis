@@ -121,6 +121,26 @@ frontend/
   app/replay/[id]/      replay mode
 ```
 
+#### MVP MCP tool inventory (read-only, `verb_noun`)
+
+Implemented in M3. Every tool returns a uniform `ToolResult` envelope (`ok`, `source`, `tool`, `error_kind`, `error`, `contains_untrusted_text`, `data`, `attempts`); upstream failure degrades to `ok=false` per Section 12 instead of raising across the MCP boundary.
+
+| Server | Tool | Returns | Untrusted free text? |
+|---|---|---|---|
+| k8s | `list_pods(namespace?)` | pod phase/readiness/restarts | no |
+| k8s | `get_pod(name, namespace?)` | describe-level detail incl. container states, CrashLoopBackOff/OOMKilled reasons | no |
+| k8s | `get_pod_logs(name, namespace?, container?, tail_lines=200)` | bounded log tail | **yes** |
+| k8s | `list_events(namespace?)` | recent events (reason, message, count) | **yes** |
+| k8s | `list_deployments(namespace?)` | desired/ready/available replicas + images | no |
+| prometheus | `query_metrics(query, time?)` | instant vector | no |
+| prometheus | `query_range_metrics(query, start, end, step="30s")` | range matrix | no |
+| prometheus | `list_alerts()` | active alerts | **yes** (annotations) |
+| github | `get_recent_commits(lookback_hours=2, branch?, limit=30)` | commits in the FR-2.2 lookback window | **yes** (messages) |
+| github | `list_pull_requests(state="closed", limit=20)` | recently updated PRs | **yes** (titles) |
+| github | `get_commit_diff(sha)` | changed files + bounded patches | **yes** (patches) |
+
+`contains_untrusted_text=true` marks outputs that must pass redaction + `<evidence>` delimiting (Section 16) before reaching any prompt; that boundary lives in the consumer (redaction middleware, Section 24), not in the servers.
+
 ### Part B — V1.5 Additions
 
 ```

@@ -53,6 +53,17 @@ The Kubernetes MCP server uses a dedicated ServiceAccount (`aegis-k8s-mcp`) boun
 Role in the `meridian` namespace: `get/list/watch` on pods, pod logs, events, services, deployments,
 replicasets — **no write verbs** (ESD §16, PRD NFR-Security). Write verbs are a V1.5 addition.
 
+## Mint the k8s MCP server credential (Milestone 3+)
+
+The backend's k8s MCP server authenticates with the `aegis-k8s-mcp` ServiceAccount token, never
+the admin kubeconfig. Mint the git-ignored token + CA files (and get the `K8S_API_URL` value):
+
+```bash
+bash infra/gen-mcp-credentials.sh          # writes infra/.k8s-mcp-token + infra/.k8s-mcp-ca.crt
+```
+
+Tokens are short-lived (default 24h); re-run when expired. `DURATION=1h` etc. to override.
+
 ## Tear down
 
 ```bash

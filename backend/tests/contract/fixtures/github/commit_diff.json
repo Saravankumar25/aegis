@@ -1,0 +1,17 @@
+{
+  "sha": "9f1c2e3d4b5a69788c7d6e5f4a3b2c1d0e9f8a7b",
+  "commit": {
+    "message": "feat: raise checkout cache TTL to 300s",
+    "author": { "name": "Saravan Kumar", "date": "2026-07-21T08:45:00Z" }
+  },
+  "stats": { "additions": 3, "deletions": 1 },
+  "files": [
+    {
+      "filename": "services/checkout/config.py",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -10,7 +10,9 @@\n-CACHE_TTL_SECONDS = 60\n+# raised to reduce catalog lookups\n+CACHE_TTL_SECONDS = 300\n+CACHE_MAX_ENTRIES = 10000"
+    }
+  ]
+}

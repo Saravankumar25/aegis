@@ -7,14 +7,16 @@ each piece. Source-of-truth hierarchy: PRD.md → ESD.md → CLAUDE.md → this 
 
 ---
 
-## Current status / resume here (as of 2026-07-21, end of session)
+## Current status / resume here (as of 2026-07-21)
 
 **Done & committed:** M0 (rename + scaffold), M1 (data layer), M2 (kind cluster + Meridian +
-Prometheus). Three commits on `main`; nothing pushed yet (push is M8, to repo `aegis`).
+Prometheus), M3 (read-only MCP servers — see the Milestone 3 section below). Nothing pushed yet
+(push is M8, to repo `aegis`).
 
-**Next up: Milestone 3 — read-only MCP servers** (`mcp_servers/{k8s,prometheus,github}`) with
-`verb_noun` tools, graceful degradation (retry→mark-unavailable), contract tests against fixtures,
-and fault-injection tests. Not started.
+**Next up: Milestone 4** — the natural next step is the redaction pipeline + evidence delimiting
+(ESD §16), since every downstream consumer of MCP evidence needs it; then agents/orchestrator
+(M5 pairs the ingestion API with the DB-backed idempotency test, per the M1 note). The MCP
+servers' `contains_untrusted_text` flag is the hook the redaction boundary consumes.
 
 **Environment state to reconnect tomorrow:**
 - Tool binaries: `KIND=~/bin/kind.exe`, `HELM=~/bin/helm.exe`,
@@ -25,7 +27,10 @@ and fault-injection tests. Not started.
 - **kind cluster `aegis`:** may still be running from today. Re-check with
   `kubectl --context kind-aegis get pods -A`; if gone, `bash infra/setup-cluster.sh` rebuilds it
   (~10 min). Prometheus at http://localhost:9090 once up.
-- Quick sanity: `cd backend && ./.venv/Scripts/python.exe -m pytest tests/unit -q && ./.venv/Scripts/python.exe -m ruff check .` → 27 passing, clean.
+- Quick sanity: `cd backend && ./.venv/Scripts/python.exe -m pytest tests -q && ./.venv/Scripts/python.exe -m ruff check .` → 48 passing, clean.
+- **k8s MCP credential:** `bash infra/gen-mcp-credentials.sh` mints the git-ignored SA token/CA
+  (token lives 24h — re-mint each session); it prints the `K8S_API_URL` (kind's mapped port
+  changes if the cluster is recreated).
 
 **Open threads:** none blocking. M5 will add the DB-backed idempotency test for `upsert_incident`;
 GitHub push (M8) will need a PAT or `gh` (not installed).
@@ -194,3 +199,131 @@ bash infra/setup-cluster.sh
 ### Follow-ups / open items
 - `inject-failure.sh error/latency` POSTs through the Service, so it lands on one of the 2 replicas
   (partial-fleet fault). For a whole-service fault, scale to 1 replica or use `killpod`. Fine for MVP.
+
+---
+
+## Milestone 3 — Read-only MCP servers (k8s, Prometheus, GitHub)
+
+**Status:** complete.
+
+### Architecture review (pre-implementation, CLAUDE.md §2)
+
+Triggers: one **new external dependency** (the GitHub REST API — k8s and Prometheus were reviewed in
+M2) and **three new untrusted data flows** (pod logs, k8s event messages, commit messages / PR
+titles / diffs — all free text authored outside Aegis).
+
+- **Reliability (ESD §12):** every upstream call retries with exponential backoff (3 attempts) on
+  *transient* failures only (connect errors, timeouts, 5xx). After exhaustion the tool returns a
+  structured `ToolResult{ok=false, error_kind="unavailable"}` envelope — never an exception across
+  the MCP boundary — so the investigation continues with a documented gap instead of stalling.
+  Non-transient responses (4xx, malformed 200-body JSON) fail fast without retry: retrying a 404 or
+  a parse error wastes the incident's time budget and can't succeed. A failure must not poison the
+  server: the process stays up and subsequent calls work (fault-injection-tested).
+- **Safety:** all three servers are read-only by construction — the k8s client only issues GETs, and
+  the RBAC from M2 (get/list/watch, no write verbs) enforces this server-side even if the client had
+  a bug. Prometheus and GitHub tools are pure queries. No autonomous action surface is introduced,
+  so no new safety mechanism (lease/breaker) is required in this milestone.
+- **Security (ESD §16):** per-server credentials — the k8s server reads the dedicated
+  `aegis-k8s-mcp` SA token from a git-ignored file minted by `infra/gen-mcp-credentials.sh`
+  (short-lived via `kubectl create token`); GitHub uses an optional `GITHUB_TOKEN` env var
+  (unauthenticated works for public repos); Prometheus is local and unauthenticated by design.
+  No credential is committed, hardcoded, or logged. TLS to the k8s API server verifies against the
+  cluster CA (also extracted to a git-ignored file), not `verify=False`.
+  **Untrusted text:** pod logs, event messages, commit messages and diffs are attacker-influencable
+  free text. Every `ToolResult` carries `contains_untrusted_text`; the redaction + `<evidence>`
+  delimiting pipeline (ESD §16) is applied by the *consumer* before any prompt — built in the
+  redaction/correlation milestone — and these servers' outputs are flagged so that boundary cannot
+  be missed silently. MCP servers do not redact themselves: redaction is a single middleware applied
+  uniformly at the evidence-consumption boundary (ESD §24), not scattered per-source.
+- **Scalability / cost:** clients cap response sizes (log `tail_lines` default 200, bounded list
+  page sizes) so a chatty pod cannot blow the token budget downstream. GitHub unauthenticated rate
+  limit (60 req/h) is acceptable for MVP local use; the token raises it when configured.
+- **Operational maturity:** each server is independently runnable (`python -m
+  mcp_servers.<name>.server`, stdio transport), stateless, and holds no incident context (ESD §10).
+  Structured logs via `core.logging`. Shared plumbing lives in `mcp_servers/common.py` — a sibling
+  *library* module, not another server's code, so CLAUDE.md §9 ("no MCP server imports another MCP
+  server's code") is respected; each server imports only stdlib, httpx, pydantic, the MCP SDK,
+  `common.py`, and `core` (settings/logging).
+
+Decision recorded: tool inventory (exact `verb_noun` names and schemas) is added to ESD §3 in this
+same change, since CLAUDE.md §4 points at ESD §3 as the naming source of truth.
+
+### What changed
+- **Shared plumbing** (`backend/mcp_servers/common.py` — a sibling library module, not a server):
+  `ToolResult` envelope (`ok, source, tool, error_kind, error, contains_untrusted_text, data,
+  attempts`), `retry_transient` (exponential backoff, 3 attempts, transient-only: connect/timeout/
+  5xx), and `guarded` (classified failures → envelope; unexpected exceptions still propagate —
+  no bare excepts, CLAUDE.md §3).
+- **k8s MCP server** (`mcp_servers/k8s/{models,client,server}.py`): tools `list_pods`, `get_pod`,
+  `get_pod_logs`, `list_events`, `list_deployments`. Plain-REST GET-only httpx client
+  authenticated with the `aegis-k8s-mcp` SA token (re-read per call → rotation without restart),
+  TLS verified against the extracted cluster CA. Models are token-budget-conscious summaries
+  (phase/ready/restarts; CrashLoopBackOff & OOMKilled surfaced from container state).
+- **Prometheus MCP server** (`mcp_servers/prometheus/`): `query_metrics`, `query_range_metrics`,
+  `list_alerts`. Handles Prometheus's in-body errors (HTTP 200 + `status:"error"` → bad_request,
+  no retry).
+- **GitHub MCP server** (`mcp_servers/github/`): `get_recent_commits` (default **2h lookback,
+  FR-2.2**), `list_pull_requests`, `get_commit_diff` (per-file patches truncated at 4,000 chars —
+  token-budget guard). Optional `GITHUB_TOKEN`; unauthenticated works for public repos.
+- **MCP transport:** each server is a FastMCP stdio app (official `mcp` SDK ≥1.2, added to
+  pyproject): `python -m mcp_servers.<name>.server`. All 11 tools registered and listed via the
+  real SDK.
+- **Credentials:** `infra/gen-mcp-credentials.sh` mints a short-lived (24h default) SA token via
+  `kubectl create token` plus the cluster CA into git-ignored `infra/.k8s-mcp-*` files;
+  `.gitignore`, `.env.example`, `core/config.py` (new k8s/github/mcp-retry settings) and
+  `infra/README.md` updated.
+
+### Decisions
+- **Retry classification:** only transient failures retry (connect error, timeout, 5xx). 4xx and
+  malformed 200-bodies fail fast — a parse error can't heal and retrying burns the incident time
+  budget. 404 maps to `not_found` (a valid answer, source still healthy), other 4xx to
+  `bad_request`, exhausted retries to `unavailable` (ESD §12 wording).
+- **`contains_untrusted_text` flag** on every envelope: pod logs, event messages, alert
+  annotations, commit messages/titles/patches are flagged; redaction + `<evidence>` delimiting
+  stays a single consumer-side middleware (ESD §24), not per-server logic. ESD §3 now carries the
+  full MVP tool inventory table documenting this per tool.
+- **`common.py` placement:** shared library beside the servers; CLAUDE.md §9 forbids importing
+  *another server's* code, which this is not. Servers import stdlib + httpx + pydantic + mcp SDK +
+  `common` + `core` only.
+- **Clients take an injected `httpx.AsyncClient`** so contract tests run against
+  `httpx.MockTransport` fixtures with zero live dependencies.
+
+### Tests (48 passing total; ruff check + format clean)
+- **Contract** (`tests/contract/`, fixtures under `tests/contract/fixtures/{k8s,prometheus,github}/`):
+  pod list/detail (CrashLoopBackOff + OOMKilled surfaced), bounded logs, Warning events, replica
+  health; instant vector / range matrix / firing alert parsing + in-body PromQL error → bad_request
+  with exactly 1 attempt; FR-2.2 `since` window assertion, PR parsing, patch truncation at
+  4,000 chars; envelope JSON round-trip with `contains_untrusted_text=true` for logs.
+- **Fault-injection** (`tests/fault_injection/test_mcp_degradation.py`, ESD §22): connection
+  refused ×3 → `unavailable` after exactly 3 attempts; read timeout → `SourceUnavailableError`;
+  repeated 500s → 3 attempts then degrade; malformed JSON → `malformed_response` with 1 attempt;
+  wrong-shape JSON → `MalformedResponseError`, no crash; 404 → `not_found`; **recovery** — same
+  client succeeds on the next call after upstream returns; backoff sequence asserted as
+  [0.2s, 0.4s].
+
+### How to run
+```bash
+cd backend && ./.venv/Scripts/python.exe -m pytest tests -q     # 48 passed
+bash infra/gen-mcp-credentials.sh                                # then set K8S_API_URL in .env
+K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_servers.k8s.server
+```
+
+### Verified (actual, live)
+- k8s client with the **real SA token + CA** (not admin kubeconfig): `list_pods` → 6/6 meridian
+  pods, `get_pod` detail (Ready=True, running), `get_pod_logs` tail=5 → 5 lines,
+  `list_deployments` → 2/2×3.
+- Prometheus live: `sum(up{namespace="meridian"})` → `6`; `list_alerts` parsed real
+  firing/pending alerts (etcd/KubeProxy alerts present right after the node restart — transient
+  and expected).
+- GitHub live against a real public repo: commits and closed PRs parsed (project repo isn't
+  pushed until M8, so the smoke used a public repo via `GITHUB_REPO` override).
+- All 11 tools enumerate through the real MCP SDK (`app.list_tools()`).
+
+### Follow-ups / open items
+- The redaction pipeline + `<evidence>` delimiting middleware (consumer side of
+  `contains_untrusted_text`) is the next natural milestone; until it exists no MCP output may be
+  fed to a prompt.
+- `query_range_metrics` got contract coverage but wasn't exercised live this session (instant
+  query + alerts were); exercise it when the Correlation agent lands.
+- Docker Desktop wasn't running at session start; first `Start-Process` launch silently failed,
+  second succeeded — if the cluster seems gone, check `docker ps` before rebuilding.

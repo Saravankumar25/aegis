@@ -1,0 +1,16 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": [
+      {
+        "metric": { "service": "checkout-service", "status": "500" },
+        "values": [
+          [1784023140.0, "12"],
+          [1784023170.0, "230"],
+          [1784023200.0, "670"]
+        ]
+      }
+    ]
+  }
+}
