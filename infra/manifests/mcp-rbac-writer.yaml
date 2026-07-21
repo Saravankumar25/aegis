@@ -1,0 +1,39 @@
+# V1.5 write-capable RBAC for the k8s MCP server (ESD §16) — a SEPARATE ServiceAccount
+# from the read-only MVP one. Grants exactly the Tier-1 action surface:
+#   - delete pods            (restart_pod: the Deployment recreates the pod)
+#   - deployments/scale      (scale_deployment: the replicas-only subresource — k8s RBAC
+#                             cannot scope a patch to one field; /scale IS that scope)
+# No exec, no secrets, no configmaps, no cluster-wide anything.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aegis-k8s-mcp-writer
+  namespace: aegis-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aegis-k8s-mcp-writer
+  namespace: meridian
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aegis-k8s-mcp-writer
+  namespace: meridian
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aegis-k8s-mcp-writer
+subjects:
+  - kind: ServiceAccount
+    name: aegis-k8s-mcp-writer
+    namespace: aegis-system

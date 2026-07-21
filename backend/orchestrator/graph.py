@@ -289,6 +289,85 @@ def build_graph(services: InvestigationServices):
         )
         return {**state, "final_state": "hypothesis_formed"}
 
+    async def resolution(state: InvestigationState) -> InvestigationState:
+        """V1.5 Resolution Agent node: propose (and gate-checked Tier-1 execute)."""
+        from agents.resolution.engine import execute_action, propose_remediation
+        from db.enums import RemediationStatus
+
+        verdict = state.get("observer_verdict")
+        result: RCAResult | None = state.get("rca_result")
+        approved = bool(verdict and verdict.approved)
+        if result is None:
+            return state
+
+        # Pick a concrete unhealthy pod for pod-targeted actions.
+        target_pod: str | None = None
+        pods_result = await services.gateway.call("k8s", "list_pods", {})
+        if pods_result.get("ok"):
+
+            def unhealthy(pod: dict) -> bool:
+                ready, _, total = pod["ready"].partition("/")
+                return pod["restarts"] > 0 or ready != total
+
+            candidates = [
+                p for p in pods_result["data"] if p["name"].startswith(state["service_name"])
+            ]
+            target_pod = next(
+                (p["name"] for p in candidates if unhealthy(p)),
+                candidates[0]["name"] if candidates else None,
+            )
+
+        async with services.sessionmaker() as session:
+            incident = await IncidentRepository(session).get(uuid.UUID(state["incident_id"]))
+            if incident is None:
+                return state
+            action = await propose_remediation(
+                session,
+                incident,
+                root_cause_category=result.root_cause_category,
+                hypothesis=result.hypothesis,
+                observer_approved=approved,
+                target_pod=target_pod,
+            )
+            if action is None:
+                await session.commit()
+                await _persist(
+                    state["incident_id"],
+                    "resolution",
+                    message=f"Resolution: no mechanical action for category "
+                    f"'{result.root_cause_category}' — investigation stays with "
+                    f"the on-call human.",
+                )
+                return state
+            if action.tier == 1:
+                action = await execute_action(
+                    session, action, services.gateway, observer_approved=approved
+                )
+            await session.commit()
+            status = action.status
+            awaiting = status == RemediationStatus.proposed and action.tier >= 2
+            message = (
+                f"Resolution: {action.action_type} on {action.target_resource_id} — "
+                f"tier {action.tier}, status {status}"
+                f"{' (SHADOW: nothing touched)' if action.shadow else ''}"
+                f"{'; awaiting human approval' if awaiting else ''}."
+            )
+        await _persist(
+            state["incident_id"],
+            "resolution",
+            message=message,
+            structured={
+                "action_type": action.action_type,
+                "tier": action.tier,
+                "status": str(status),
+                "shadow": action.shadow,
+                "blast_radius": action.blast_radius,
+                "compensating_action": action.compensating_action,
+            },
+            event="resolution",
+        )
+        return state
+
     def route_after_observer(state: InvestigationState) -> str:
         verdict = state["observer_verdict"]
         if verdict.approved or state.get("revision_count", 0) >= 1:
@@ -302,11 +381,13 @@ def build_graph(services: InvestigationServices):
     graph.add_node("observer", observer)
     graph.add_node("revise", revise)
     graph.add_node("finalize", finalize)
+    graph.add_node("resolution", resolution)
     graph.set_entry_point("triage")
     graph.add_edge("triage", "correlation")
     graph.add_edge("correlation", "rca")
     graph.add_edge("rca", "observer")
     graph.add_conditional_edges("observer", route_after_observer)
     graph.add_edge("revise", "rca")
-    graph.add_edge("finalize", END)
+    graph.add_edge("finalize", "resolution")
+    graph.add_edge("resolution", END)
     return graph.compile()

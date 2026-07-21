@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Short-lived ServiceAccount token + cluster CA, minted by infra/gen-mcp-credentials.sh.
     # Both files are git-ignored; the token is read per-call so rotation needs no restart.
     k8s_token_file: str = Field(default="../infra/.k8s-mcp-token")
+    # V1.5 write credential (separate SA: delete pods + deployments/scale ONLY, ESD §16).
+    # Only the k8s MCP server process reads it; absent file = write tools degrade.
+    k8s_writer_token_file: str = Field(default="../infra/.k8s-mcp-writer-token")
     k8s_ca_cert_file: str = Field(default="../infra/.k8s-mcp-ca.crt")
     k8s_namespace: str = Field(default="meridian")
 

@@ -514,3 +514,34 @@ Triggers: **new autonomous action types** (restart pod, scale deployment), **new
 - **Tests (117 passing):** second lease refused + reacquire after release; **4-way concurrent
   lease race → exactly one winner** (real DB race); per-service rate-limit promotion with
   cross-service isolation; global breaker trip + admin clear; kill-switch round-trip.
+
+## V1.5b — k8s write tools + Resolution Agent
+
+**Status:** complete.
+
+- **Writer RBAC** (`infra/manifests/mcp-rbac-writer.yaml`): separate SA
+  `aegis-k8s-mcp-writer` — `delete pods` + `deployments/scale` (get/patch/update) in meridian
+  only. The read-only MVP SA is untouched; `gen-mcp-credentials.sh` mints the writer token only
+  when the SA exists. ESD §3/§16 honored: `/scale` subresource = the replicas-only patch surface.
+- **k8s MCP write tools**: `restart_pod`, `scale_deployment` (ESD §3 updated). Write requests get
+  **one attempt, no blind retry**; scale records `previous_replicas` (feeds the compensating
+  action). Missing writer token ⇒ SourceUnavailable ⇒ the write capability simply doesn't exist.
+- **Action catalog** (`agents/resolution/actions.py`, FR-4.1): restart_pod=T1,
+  scale_deployment=T2, rollback_deploy=T3 (mcp_server=None — structurally not machine-executable).
+  Compensating action documented at definition time; the model makes an undocumented undo
+  impossible. Category→action map: error_spike/unknown deliberately map to *no* action.
+- **Engine** (`agents/resolution/engine.py`): idempotent `propose_remediation` (unique key =
+  incident:action:target; FR-4.3 reasoning + FR-4.4 blast radius recorded pre-execution) and
+  `execute_action` behind **four ordered gates**: kill switch → expiry → tier/approval →
+  (Tier-1 only) observer-validated + blast-radius ≤ limit + global breaker; then lease-wrapped
+  MCP call, breaker accounting, always-release. Failure ⇒ `failed` + compensating action
+  *offered* (ESD §12). Tier-1 **shadow mode ON by default**: records `would_call`, touches
+  nothing. `execute_compensating_action` = human-triggered scale-back.
+- **Orchestration**: new `resolution` graph node after finalize (proposes; Tier-1 executes
+  inline); worker sweep executes **approved** Tier-2 actions (approval in API, execution in
+  worker — ESD §11) under `FOR UPDATE SKIP LOCKED`.
+- **Tests (130 passing):** catalog invariants; shadow-executes-nothing; real Tier-1 restart →
+  monitoring; kill switch blocks; blast-radius gate escalates; unvalidated hypothesis never
+  auto-executes; **Tier-2 scale 2→3 then compensating action restores 2 (stateful fake — the
+  reversal is proven on state, not on call counts)**; expired proposal refused; proposal
+  idempotency.

@@ -20,7 +20,7 @@ import httpx
 from pydantic import ValidationError
 
 from core.config import get_settings
-from mcp_servers.common import MalformedResponseError, retry_transient
+from mcp_servers.common import MalformedResponseError, SourceUnavailableError, retry_transient
 from mcp_servers.k8s.models import (
     ContainerStatus,
     DeploymentSummary,
@@ -39,6 +39,7 @@ class K8sClient:
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
         settings = get_settings()
         self._token_file = Path(settings.k8s_token_file)
+        self._writer_token_file = Path(settings.k8s_writer_token_file)
         self._attempts = settings.mcp_retry_attempts
         self._base_delay = settings.mcp_retry_base_delay_seconds
         if http is not None:
@@ -52,10 +53,19 @@ class K8sClient:
             )
         self._injected = http is not None
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, writer: bool = False) -> dict[str, str]:
+        """Read tools use the read-only SA; write tools use the separate writer SA
+        (V1.5, ESD §16). A missing writer token surfaces as SourceUnavailable — the write
+        capability simply doesn't exist until the operator mints it."""
         headers = {"Accept": "application/json"}
         if not self._injected:
-            token = self._token_file.read_text(encoding="utf-8").strip()
+            token_file = self._writer_token_file if writer else self._token_file
+            if writer and not token_file.exists():
+                raise SourceUnavailableError(
+                    "k8s writer credential not minted (run infra/gen-mcp-credentials.sh "
+                    "after applying mcp-rbac-writer.yaml)"
+                )
+            token = token_file.read_text(encoding="utf-8").strip()
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
@@ -143,6 +153,60 @@ class K8sClient:
         except (KeyError, TypeError, ValidationError) as exc:
             raise MalformedResponseError(f"unexpected deployment list shape: {exc}") from exc
         return deployments, attempts
+
+    # --- V1.5 write operations (writer SA only; forward actions of Tier-1/2) -----------
+
+    async def restart_pod(self, name: str, namespace: str) -> tuple[dict[str, Any], int]:
+        """Delete one pod; its Deployment recreates it (the Tier-1 'restart')."""
+        response, attempts = await retry_transient(
+            lambda: self._http.delete(
+                f"/api/v1/namespaces/{namespace}/pods/{name}",
+                headers=self._headers(writer=True),
+            ),
+            attempts=1,  # deletes are NOT retried blindly: one attempt, caller decides
+            base_delay_seconds=self._base_delay,
+            source=SOURCE,
+            tool="restart_pod",
+        )
+        body = self._json(response)
+        return {"deleted": name, "namespace": namespace, "status": body.get("status")}, attempts
+
+    async def scale_deployment(
+        self, name: str, replicas: int, namespace: str
+    ) -> tuple[dict[str, Any], int]:
+        """Patch the /scale subresource — the replicas-only write surface (ESD §16)."""
+        current, _ = await retry_transient(
+            lambda: self._http.get(
+                f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
+                headers=self._headers(writer=True),
+            ),
+            attempts=self._attempts,
+            base_delay_seconds=self._base_delay,
+            source=SOURCE,
+            tool="scale_deployment",
+        )
+        previous = self._json(current).get("spec", {}).get("replicas")
+        response, attempts = await retry_transient(
+            lambda: self._http.patch(
+                f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
+                headers={
+                    **self._headers(writer=True),
+                    "Content-Type": "application/merge-patch+json",
+                },
+                content=json.dumps({"spec": {"replicas": replicas}}),
+            ),
+            attempts=1,  # writes get one attempt; idempotency lives in the action layer
+            base_delay_seconds=self._base_delay,
+            source=SOURCE,
+            tool="scale_deployment",
+        )
+        body = self._json(response)
+        return {
+            "deployment": name,
+            "namespace": namespace,
+            "previous_replicas": previous,
+            "replicas": body.get("spec", {}).get("replicas"),
+        }, attempts
 
     async def aclose(self) -> None:
         await self._http.aclose()

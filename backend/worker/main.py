@@ -80,6 +80,34 @@ class Worker:
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
             with contextlib.suppress(Exception):
                 await self.reconcile()
+            with contextlib.suppress(Exception):
+                await self.execute_approved_actions()
+
+    async def execute_approved_actions(self) -> None:
+        """V1.5: run approved (unexpired) Tier-2 actions through the gate-checked executor.
+
+        Approval happens in the API process; execution stays in the worker (ESD §11:
+        the API never acts on infrastructure inline).
+        """
+        from agents.resolution.engine import execute_action
+        from db.enums import RemediationStatus
+        from db.models import RemediationAction
+
+        async with self.sessionmaker() as session:
+            actions = (
+                (
+                    await session.execute(
+                        select(RemediationAction)
+                        .where(RemediationAction.status == RemediationStatus.approved)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for action in actions:
+                await execute_action(session, action, self.gateway, observer_approved=True)
+            await session.commit()
 
     async def reconcile(self) -> None:
         """ESD §4 startup/periodic reconciliation: enqueue open + stale-investigating."""

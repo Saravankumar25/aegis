@@ -18,6 +18,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 "$KUBECTL" --context "$CONTEXT" -n aegis-system create token aegis-k8s-mcp \
   --duration "$DURATION" > "$HERE/.k8s-mcp-token"
 
+# V1.5 writer SA (delete pods + deployments/scale only). Minted only if the SA exists.
+if "$KUBECTL" --context "$CONTEXT" -n aegis-system get sa aegis-k8s-mcp-writer >/dev/null 2>&1; then
+  "$KUBECTL" --context "$CONTEXT" -n aegis-system create token aegis-k8s-mcp-writer \
+    --duration "$DURATION" > "$HERE/.k8s-mcp-writer-token"
+  echo "Wrote $HERE/.k8s-mcp-writer-token (valid $DURATION)"
+fi
+
 "$KUBECTL" config view --raw --minify --context "$CONTEXT" \
   -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
   | base64 -d > "$HERE/.k8s-mcp-ca.crt"

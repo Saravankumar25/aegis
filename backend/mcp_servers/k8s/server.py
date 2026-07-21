@@ -122,6 +122,50 @@ async def list_deployments(namespace: str | None = None) -> dict[str, Any]:
     return (await guarded(SOURCE, "list_deployments", fetch)).model_dump()
 
 
+# --- V1.5 write tools (Tier-1/2 forward actions; writer SA credential, ESD §16) ----------
+# Idempotency/leasing/breakers/kill-switch are enforced in the Resolution layer, which owns
+# the remediation_actions rows; the MCP server stays stateless (ESD §10). The
+# idempotency_key parameter here is carried for audit correlation only.
+
+
+@app.tool()
+async def restart_pod(
+    name: str, idempotency_key: str, namespace: str | None = None
+) -> dict[str, Any]:
+    """Restart one pod by deleting it (its Deployment recreates it). Tier-1 action."""
+
+    async def fetch() -> ToolResult:
+        result, attempts = await _get_client().restart_pod(name, _ns(namespace))
+        return ToolResult(
+            ok=True,
+            source=SOURCE,
+            tool="restart_pod",
+            data={**result, "idempotency_key": idempotency_key},
+            attempts=attempts,
+        )
+
+    return (await guarded(SOURCE, "restart_pod", fetch)).model_dump()
+
+
+@app.tool()
+async def scale_deployment(
+    name: str, replicas: int, idempotency_key: str, namespace: str | None = None
+) -> dict[str, Any]:
+    """Set a deployment's replica count via the /scale subresource. Tier-2 action."""
+
+    async def fetch() -> ToolResult:
+        result, attempts = await _get_client().scale_deployment(name, replicas, _ns(namespace))
+        return ToolResult(
+            ok=True,
+            source=SOURCE,
+            tool="scale_deployment",
+            data={**result, "idempotency_key": idempotency_key},
+            attempts=attempts,
+        )
+
+    return (await guarded(SOURCE, "scale_deployment", fetch)).model_dump()
+
+
 if __name__ == "__main__":
     configure_logging()
     app.run()

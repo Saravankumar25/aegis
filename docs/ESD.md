@@ -139,6 +139,8 @@ Implemented in M3. Every tool returns a uniform `ToolResult` envelope (`ok`, `so
 | github | `list_pull_requests(state="closed", limit=20)` | recently updated PRs | **yes** (titles) |
 | github | `get_commit_diff(sha)` | changed files + bounded patches | **yes** (patches) |
 
+**V1.5 write tools** (added V1.5b, writer ServiceAccount only): `restart_pod(name, idempotency_key, namespace?)` — Tier-1 forward action, delete-and-let-Deployment-recreate; `scale_deployment(name, replicas, idempotency_key, namespace?)` — Tier-2 forward action via the `/scale` subresource (the replicas-only write surface; k8s RBAC cannot scope a patch to a single field, `/scale` *is* that scope). Writes are attempted once, never blind-retried; idempotency, leasing, breakers and the kill switch live in the Resolution layer, keeping the MCP server stateless (Section 10).
+
 `contains_untrusted_text=true` marks outputs that must pass redaction + `<evidence>` delimiting (Section 16) before reaching any prompt; that boundary lives in the consumer (redaction middleware, Section 24), not in the servers.
 
 ### Part B — V1.5 Additions
