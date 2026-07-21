@@ -327,3 +327,19 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
   query + alerts were); exercise it when the Correlation agent lands.
 - Docker Desktop wasn't running at session start; first `Start-Process` launch silently failed,
   second succeeded — if the cluster seems gone, check `docker ps` before rebuilding.
+
+---
+
+## Milestone 4 — Redaction pipeline + evidence delimiting
+
+**Status:** complete.
+
+- `redaction/pipeline.py`: single deterministic pass — emails, IPv4, phones, **Luhn-validated**
+  card numbers (so 16-digit trace ids survive), secret assignments (`api_key=`, `password:` …)
+  and bearer tokens (bearer runs before the assignment pattern so `Authorization: Bearer <jwt>`
+  redacts the jwt, not the word "Bearer"). `wrap_evidence(id, source, text)` redacts then wraps
+  in `<evidence>` delimiters, **defanging embedded `</evidence>`** so untrusted text can't close
+  its own data region (ESD §16); tag attributes sanitized. `EVIDENCE_RULES` is the standing
+  system-prompt clause consumers prepend.
+- Placement per ESD §24: one middleware applied before embed/cache/log/prompt — never after.
+- Tests: 6 unit tests (PII classes, Luhn negative case, injection defang, clean-text no-op).
