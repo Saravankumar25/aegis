@@ -24,6 +24,13 @@ from core.config import get_settings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
+# Pinned rather than inherited from the developer's `.env`. Leaving it ambient made these
+# tests pass only while ingestion was *unauthenticated*: setting a real token locally turned
+# every ingestion test into a 401, and the security control itself was never exercised. Now
+# the guard is on for every ingestion test, and `test_ingest_rejects_*` proves it rejects.
+TEST_WEBHOOK_TOKEN = "test-webhook-token"  # noqa: S105 — fixture value, not a credential
+WEBHOOK_HEADERS = {"x-aegis-webhook-token": TEST_WEBHOOK_TOKEN}
+
 
 def _test_url() -> str:
     return get_settings().database_url.rsplit("/", 1)[0] + "/aegis_test"
@@ -96,6 +103,7 @@ async def api_client(db_url: str, session: AsyncSession) -> AsyncIterator[httpx.
     """
     os.environ["DATABASE_URL"] = db_url
     os.environ["ENVIRONMENT"] = "test"
+    os.environ["INGEST_WEBHOOK_TOKEN"] = TEST_WEBHOOK_TOKEN
     get_settings.cache_clear()
     import core.db as core_db
 
@@ -106,7 +114,12 @@ async def api_client(db_url: str, session: AsyncSession) -> AsyncIterator[httpx.
 
     app = create_app()
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        # Sent by default so ingestion tests exercise the guarded path. A test that needs
+        # the unauthenticated case overrides the header explicitly, which makes the
+        # negative case visible at the call site instead of implied by configuration.
+        headers=WEBHOOK_HEADERS,
     ) as client:
         yield client
 
@@ -115,3 +128,4 @@ async def api_client(db_url: str, session: AsyncSession) -> AsyncIterator[httpx.
     core_db._sessionmaker = None
     os.environ.pop("DATABASE_URL", None)
     os.environ.pop("ENVIRONMENT", None)
+    os.environ.pop("INGEST_WEBHOOK_TOKEN", None)

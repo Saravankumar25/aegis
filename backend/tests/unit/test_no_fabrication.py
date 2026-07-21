@@ -40,7 +40,11 @@ def test_no_stub_provider_is_importable():
 
 @pytest.mark.parametrize("name", ["stub", "mock", "fake", "offline", "dummy"])
 def test_factory_refuses_every_non_real_provider(name: str):
-    with pytest.raises(ValueError, match="only supported value is 'openrouter'"):
+    # Matched on the stable part of the message rather than the full sentence: the list
+    # of real providers grows (openrouter, gemini, ...), and a test that breaks whenever
+    # a legitimate provider is added trains people to edit the assertion instead of
+    # reading it. What must never change is that a fabricating provider is rejected.
+    with pytest.raises(ValueError, match="unsupported LLM provider"):
         get_provider(name)
 
 

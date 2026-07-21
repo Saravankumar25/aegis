@@ -472,3 +472,66 @@ Each entry must include:
   RAGAS metrics are wired but have never been executed (they need the extra *and* a judge model),
   so **no faithfulness or hallucination number exists yet**; end-to-end real-model validation
   remains blocked on OpenRouter quota.
+
+### 2026-07-21 — Entry 13: Environment repair, second LLM vendor, untested security control (V2f)
+- **Audit first, and the repo's own status line was wrong.** CLAUDE.md claimed "274 backend
+  tests pass". A clean run gave **5 failed, 215 passed, 54 skipped**. Two independent causes,
+  both invisible to anyone reading the log: `fastembed` was declared in `pyproject.toml` but
+  **not installed** in the venv, so the entire embedding/RAG layer failed at import; and the 54
+  integration tests were **silently skipping** because Postgres/Redis were not running, so they
+  had never actually executed. A suite that skips on missing infrastructure reports green while
+  proving nothing — the skip count is the number worth reading, not the pass count.
+- **`.env` was a byte-identical copy of `.env.example`.** Placeholder OpenRouter keys, placeholder
+  Firebase project id, placeholder `JWT_SECRET`, and `K8S_API_URL` pointing at `6443` while kind
+  actually maps a random host port. Nothing touching an external service could have worked, despite
+  Entries 8–12 describing live verification. Populated from the operator's existing credential
+  files; **no source file changed**, which is the point of keeping every value in env.
+- **New convention — env files are written as UTF-8 explicitly.** Repairing `.env` on Windows
+  wrote `§` as cp1252 (`0xa7`), and `python-dotenv` reads UTF-8, so the whole file failed to parse
+  with a `UnicodeDecodeError` pointing at a byte offset rather than at the setting. Any tooling
+  that rewrites an env file must encode explicitly rather than relying on the platform default.
+- **Second LLM vendor (`providers/gemini.py`, ESD §20).** OpenRouter's free models share one
+  account-wide *daily* cap; when it is spent no agent can reason until the UTC reset, which is not
+  a throttle the retry sweep can ride out, and it had blocked end-to-end AI validation for two
+  entries. All four keys were exhausted at audit time. Gemini is an independent capacity pool
+  behind the same `LLMProvider` Strategy, with the same two recovery axes (key rotation, model
+  fallback) because free capacity is unreliable by default — `gemini-3.5-flash` answering 503
+  "high demand" while `gemini-3.1-flash-lite` served normally was the *observed* state, not a
+  hypothetical.
+- **New convention — providers are alternatives, not an automatic chain.** Falling back across
+  *vendors* would make it unclear after the fact which model produced a given hypothesis, and that
+  attribution is what makes a quality regression diagnosable. Switching vendor is a config change.
+- **Shared enforcement, hoisted rather than copied.** `providers/errors.py` (the failure taxonomy,
+  previously defined inside the OpenRouter module — so "handle exhaustion" implicitly meant
+  "import OpenRouter", the wrong dependency direction for a Strategy) and `providers/structured.py`
+  (the schema validate-and-repair loop). A second provider must not be able to ship a weaker
+  version of a guarantee callers branch on.
+- **`providers/gemini_schema.py`: Gemini does not accept JSON Schema.** It accepts an OpenAPI
+  subset — no `$ref`/`$defs`, uppercase type names, no `title`/`default`/`additionalProperties`,
+  and optionals as `nullable` rather than `anyOf: [T, null]`. This is separately and directly
+  tested because its failure mode is *silent*: a degraded schema yields output that fails Pydantic
+  validation downstream, and the repair loop misreads that as the model's fault and burns the whole
+  repair budget re-asking a question that was malformed before it was sent. `propertyOrdering` is
+  emitted because Gemini's decoder is order-sensitive.
+- **Bug found and fixed while writing tests: a test that could not fail.** The credential-hygiene
+  test used `caplog`, but the project configures structlog with a `PrintLoggerFactory` that writes
+  to stdout and never reaches stdlib logging — so it captured nothing and passed vacuously. Now
+  uses `capsys` and asserts the log output is *non-empty* before asserting the key is absent, so it
+  fails loudly if logging is rewired again rather than silently going vacuous.
+- **Security control that was never tested, and only passed while disabled.** The ingest webhook
+  guard had no coverage in `test_ingestion_api.py`; the tests inherited whatever
+  `INGEST_WEBHOOK_TOKEN` the developer happened to have locally, so setting a real token turned
+  every ingestion test into a 401. The fixture now pins the token and sends it by default — every
+  ingestion test exercises the guarded path — plus three new rejection tests, including one proving
+  a rejected request performs **no write** (a guard that 401s after inserting is cosmetic).
+- **Verified live, not just in tests:** `gemini-3.1-flash-lite` answered `complete` (1.0s),
+  `complete_structured` (valid on the **first** attempt, 0 repairs — the schema translation is
+  correct end-to-end, including `Literal` enums, bounded floats, nested lists and optionals), and
+  `stream`. **303 tests pass, 0 failed, 0 skipped** (was 215 passed / 5 failed / 54 skipped); ruff
+  clean.
+- **Still open, explicitly not claimed:** the RAG relevance floor (`rag_min_score=0.0`) is
+  unchanged and the `unanswerable` golden case still fails; LangSmith remains inert without
+  `LANGSMITH_API_KEY`; RAGAS has still never been executed; Resolution and Memory remain
+  deterministic; the frontend has not been touched this entry and still lacks search, filters,
+  profile, notifications and general settings; `/health` and `/metrics` live at `/api/v1/*`, not
+  the paths ESD §7 documents; and `/docs`, `/redoc`, `/openapi.json` are publicly exposed.

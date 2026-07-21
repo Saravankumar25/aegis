@@ -28,43 +28,34 @@ from collections.abc import AsyncIterator
 from typing import Any, TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from core.config import get_settings
 from core.logging import get_logger
 from core.tracing import wrap_llm_call
 from providers.base import LLMProvider, LLMResult, StructuredResult
-from providers.parsing import parse_json_object, strip_code_fences
+
+# Re-exported: these were originally defined here, and `from providers.openrouter import
+# ProviderExhausted` remains valid. They now live in `providers.errors` so a second
+# provider can raise the same types without importing this module (see that module).
+from providers.errors import (
+    DailyQuotaExhausted,
+    ProviderExhausted,
+    RateLimited,
+    StructuredOutputError,
+)
+from providers.parsing import strip_code_fences
+from providers.structured import complete_structured_with_repair
+
+__all__ = [
+    "DailyQuotaExhausted",
+    "OpenRouterProvider",
+    "ProviderExhausted",
+    "RateLimited",
+    "StructuredOutputError",
+]
 
 StructuredT = TypeVar("StructuredT", bound=BaseModel)
-
-
-class StructuredOutputError(RuntimeError):
-    """The model could not be coerced into the required schema within the repair budget.
-
-    Raised rather than returning a partially-valid object: a caller that branches on this
-    output cannot tell a hallucinated field from a real one, so a half-parsed result is more
-    dangerous than a failure.
-    """
-
-
-class RateLimited(Exception):
-    """Upstream said 429 (or the key was rejected) — try another key/model."""
-
-
-class ProviderExhausted(RuntimeError):
-    """Every configured model and key was unavailable. No answer is better than a fake one."""
-
-
-class DailyQuotaExhausted(ProviderExhausted):
-    """The account's free-model daily allowance is spent — distinct from momentary throttling.
-
-    Worth its own type because the operator response is completely different: a
-    per-minute throttle clears itself in seconds and the retry sweep handles it,
-    whereas a daily cap needs either a wait until the UTC reset or credits on the
-    account. Collapsing both into "rate limited" sends people to re-run a command
-    that cannot possibly succeed for hours.
-    """
 
 
 class OpenRouterProvider(LLMProvider):
@@ -291,81 +282,22 @@ class OpenRouterProvider(LLMProvider):
     ) -> StructuredResult[StructuredT]:
         """Return output validated against ``schema``, repairing a bounded number of times.
 
-        Three layers, because free-tier models honour none of them reliably on their own:
-        the API is *asked* for the schema, the response is *parsed* tolerantly (fenced blocks
-        and prose-wrapped objects are routine), and the result is *validated*. Only a
-        validated object is returned; otherwise this raises.
-
-        Repair feeds the validation error back to the model rather than simply re-rolling.
-        A blind retry re-samples the same misunderstanding; naming the offending field is
-        what actually changes the outcome.
+        The enforcement loop is shared across providers (``providers.structured``) so the
+        schema guarantee cannot weaken depending on which vendor answered. This method
+        supplies only the OpenRouter-specific part: `complete` accepts ``json_schema`` and
+        turns it into an OpenAI-style ``response_format``.
         """
-        json_schema = schema.model_json_schema()
-        attempt_prompt = prompt
-        last_error = ""
-        total_tokens = 0
-        total_cost = 0.0
-        started = time.perf_counter()
-
-        for repair in range(self._structured_repair_attempts + 1):
-            result = await self.complete(
-                attempt_prompt,
-                agent=agent,
-                system=system,
-                ensemble_pass=ensemble_pass,
-                max_tokens=max_tokens,
-                prompt_ref=prompt_ref,
-                json_schema=json_schema,
-            )
-            total_tokens += result.tokens_used
-            total_cost += result.cost_usd
-
-            payload = parse_json_object(result.text)
-            if payload is not None:
-                try:
-                    value = schema.model_validate(payload)
-                except ValidationError as exc:
-                    last_error = _summarize_validation_error(exc)
-                else:
-                    if repair:
-                        self._log.info(
-                            "llm_structured_repaired",
-                            agent=agent,
-                            schema=schema.__name__,
-                            attempts=repair,
-                        )
-                    return StructuredResult(
-                        value=value,
-                        result=LLMResult(
-                            text=result.text,
-                            model=result.model,
-                            tokens_used=total_tokens,
-                            cost_usd=total_cost,
-                            latency_ms=int((time.perf_counter() - started) * 1000),
-                            prompt_ref=prompt_ref,
-                            repair_attempts=repair,
-                        ),
-                    )
-            else:
-                last_error = "response was not a JSON object"
-
-            self._log.warning(
-                "llm_structured_invalid",
-                agent=agent,
-                schema=schema.__name__,
-                attempt=repair + 1,
-                error=last_error,
-            )
-            attempt_prompt = (
-                f"{prompt}\n\n"
-                f"Your previous response was rejected: {last_error}\n"
-                f"Respond with JSON only — no prose, no markdown fences — matching exactly "
-                f"this JSON Schema:\n{json.dumps(json_schema)}"
-            )
-
-        raise StructuredOutputError(
-            f"agent '{agent}' could not produce valid {schema.__name__} after "
-            f"{self._structured_repair_attempts + 1} attempts; last error: {last_error}"
+        return await complete_structured_with_repair(
+            self.complete,
+            prompt,
+            schema=schema,
+            agent=agent,
+            log=self._log,
+            repair_attempts=self._structured_repair_attempts,
+            system=system,
+            ensemble_pass=ensemble_pass,
+            max_tokens=max_tokens,
+            prompt_ref=prompt_ref,
         )
 
     async def stream(
@@ -465,16 +397,3 @@ class OpenRouterProvider(LLMProvider):
 
     async def aclose(self) -> None:
         await self._http.aclose()
-
-
-def _summarize_validation_error(exc: ValidationError) -> str:
-    """Compact, model-readable description of what was wrong.
-
-    Pydantic's full error text is long and repetitive; feeding it back verbatim wastes budget
-    and buries the actionable part. Field path plus message is what changes the next attempt.
-    """
-    parts = []
-    for error in exc.errors()[:5]:
-        location = ".".join(str(p) for p in error["loc"]) or "(root)"
-        parts.append(f"{location}: {error['msg']}")
-    return "; ".join(parts)

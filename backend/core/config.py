@@ -78,7 +78,23 @@ class Settings(BaseSettings):
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
     # Comma-separated; the provider rotates across them when one is rate-limited.
     openrouter_api_keys: str = Field(default="")
-    google_api_keys: str = Field(default="")
+
+    # --- Gemini (ESD §20). An independent capacity pool from OpenRouter, whose free
+    # models share one account-wide DAILY cap; when that is spent no agent can reason
+    # until the reset, which is not something the retry sweep can ride out. Model names
+    # are namespaced per provider because the two vendors' identifiers do not overlap
+    # and a shared setting would silently send an OpenRouter slug to Google. ---
+    gemini_base_url: str = Field(default="https://generativelanguage.googleapis.com/v1beta")
+    # Comma-separated; the provider rotates across them when one is rate-limited.
+    gemini_api_keys: str = Field(default="")
+    gemini_model_rca: str = Field(default="gemini-3.1-flash-lite")
+    gemini_model_default: str = Field(default="gemini-3.1-flash-lite")
+    # Free Gemini capacity genuinely moves between models during the day (503 "high
+    # demand" on one while another serves normally), so the chain is load-bearing.
+    gemini_model_fallbacks: str = Field(
+        default="gemini-3.1-flash-lite,gemini-flash-latest,gemini-3.5-flash"
+    )
+
     # Per-agent model assignment (ESD §20: right-size capability to task difficulty).
     # RCA does the actual reasoning and must emit strict JSON; the others summarize.
     llm_model_rca: str = Field(default="nvidia/nemotron-3-super-120b-a12b:free")
@@ -105,6 +121,14 @@ class Settings(BaseSettings):
     @property
     def llm_fallback_list(self) -> list[str]:
         return [m.strip() for m in self.llm_model_fallbacks.split(",") if m.strip()]
+
+    @property
+    def gemini_key_list(self) -> list[str]:
+        return [k.strip() for k in self.gemini_api_keys.split(",") if k.strip()]
+
+    @property
+    def gemini_fallback_list(self) -> list[str]:
+        return [m.strip() for m in self.gemini_model_fallbacks.split(",") if m.strip()]
 
     # --- RAG: embedding model (ESD §20). Local ONNX BGE — no per-call cost, no network at
     # request time. Changing model/dim requires migrating the pgvector columns to match;
