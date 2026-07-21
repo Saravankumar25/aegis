@@ -343,3 +343,36 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
   system-prompt clause consumers prepend.
 - Placement per ESD §24: one middleware applied before embed/cache/log/prompt — never after.
 - Tests: 6 unit tests (PII classes, Luhn negative case, injection defang, clean-text no-op).
+
+---
+
+## Milestone 5 — API layer: ingestion, auth, SSE, replay
+
+**Status:** complete.
+
+- **Ingestion** (`POST /api/v1/incidents`, FR-1.1): three-outcome contract — exact
+  `external_alert_id` retry → idempotent no-op (FR-10.1, the DB-backed test promised in M1 now
+  exists); different alert id but same (service, source) active within the 5-min window →
+  **merged** (FR-1.2, audit-logged); otherwise a new `open` incident with severity from the
+  deterministic Triage classifier (`agents/triage/classifier.py`, FR-1.3 — criticality × kind
+  matrix, unit-tested 12 ways). The commit's `pg_notify` doubles as the worker wake-up (enqueue ==
+  committed open row; no separate queue table).
+- **Auth** (ESD §8): bcrypt directly (passlib is incompatible with bcrypt≥4.1), access+refresh
+  JWTs in httpOnly/SameSite=Strict cookies (`Secure` outside local/test), refresh rotation with
+  **family-wide revocation on reuse** — new `refresh_sessions` table (migration `0002`, ESD §6
+  updated), storing only SHA-256 of the token id. Failure paths return the envelope + cleared
+  cookies as a direct response (a `raise` would discard cookie mutations — real FastAPI footgun).
+- **Events** (`api/events.py`): Postgres LISTEN/NOTIFY hub → per-incident asyncio queues → SSE
+  (`GET /incidents/{id}/stream`) with 15s keepalive comments. Push end-to-end, no polling
+  (CLAUDE.md §11). Any number of API processes can host the hub; Postgres stays the only bus.
+- **Replay** (`GET /incidents/{id}/replay`, FR-9): transitions + steps + messages merged into one
+  ordered sequence from persisted rows only — no live infra needed (FR-9.2).
+- **Error envelope** (ESD §12): `{error_code, message, incident_id}` for every 4xx/5xx incl.
+  validation and unhandled exceptions (logged server-side, opaque 500 out).
+- **Conventions:** new `tests/integration/` directory (ESD §21 + CLAUDE.md §9 updated) backed by
+  an auto-created, Alembic-migrated `aegis_test` DB; suite self-skips without Postgres. Ruff
+  per-file-ignore B008 for `api/**` (FastAPI `Depends` idiom). `Settings` now reads `.env` from
+  both CWD and repo root. Webhook shared-secret guard (`INGEST_WEBHOOK_TOKEN`) off locally.
+- **Tests: 75 passing** (unit + contract + fault-injection + 9 integration: idempotency, dedup
+  in/out of scope, envelope shape, login/me cookies, account-enumeration parity, rotation +
+  reuse-detection killing the family, list requires auth).

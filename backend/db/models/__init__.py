@@ -6,6 +6,7 @@ Importing this package registers every model on ``Base.metadata`` so Alembic aut
 
 from db.models.agent import AgentMessage, AgentStep, EvidenceCitation
 from db.models.audit import AuditLog
+from db.models.auth import RefreshSession
 from db.models.base import Base
 from db.models.incident import Incident, IncidentStateTransition
 from db.models.runbook import Runbook
@@ -21,4 +22,5 @@ __all__ = [
     "Runbook",
     "User",
     "AuditLog",
+    "RefreshSession",
 ]

@@ -213,6 +213,10 @@ Composite index on `(service_name, incident_type)` — the compound scoping key 
 **users**
 `id · email · hashed_password · role(admin|on_call_engineer|viewer) · created_at`
 
+**refresh_sessions** *(added in M5 for the ESD §8 rotation/reuse-detection requirement)*
+`id · user_id (fk) · token_hash (sha256, unique) · family_id · expires_at · rotated_at (nullable) · revoked_at (nullable) · created_at`
+One row per refresh-token generation; a login starts a *family*. Presenting a token whose row is already `rotated_at`-stamped is treated as theft and revokes the whole family.
+
 **audit_log** *(partitioned monthly, 13-month rolling retention)* **[review fix]**
 `id · actor_type(agent|human|system) · actor_id · action · target · incident_id · metadata (jsonb) · created_at`
 
@@ -374,7 +378,7 @@ aegis/
     safety/{resource_lease,circuit_breaker,kill_switch}/
     mcp_servers/{k8s,prometheus,github,slack,pagerduty_mock}/
     db/{models,migrations}/
-    tests/{unit,contract,eval,fault_injection}/
+    tests/{unit,contract,eval,fault_injection,integration}/   # integration = DB-backed API tests (M5)
   frontend/
     app/{dashboard,incidents,replay,approvals,settings}/
     components/

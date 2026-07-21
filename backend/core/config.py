@@ -15,7 +15,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Typed configuration for the Aegis backend."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # Both paths so `python -m ...` works from backend/ and from the repo root; real env
+    # vars always take precedence over either file.
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     # --- Database (single Postgres + pgvector, ESD §19) ---
     database_url: str = Field(
@@ -59,6 +63,14 @@ class Settings(BaseSettings):
     mcp_retry_attempts: int = Field(default=3)
     mcp_retry_base_delay_seconds: float = Field(default=0.2)
     mcp_http_timeout_seconds: float = Field(default=10.0)
+
+    # --- API surface (ESD §7) ---
+    cors_origins: str = Field(
+        default="http://localhost:3000",
+        description="Comma-separated allowed origins for the frontend.",
+    )
+    # Shared secret for the ingestion webhook; unset locally (kind cluster is trusted).
+    ingest_webhook_token: str | None = Field(default=None)
 
     # Runtime environment marker; "test" disables some production-only guards.
     environment: str = Field(default="local")

@@ -67,7 +67,7 @@ Aegis is a multi-agent incident response system: seven agents (Triage, Correlati
 ## 9. File Organization Rules
 
 - Follow the folder structure in ESD.md Section 21 exactly. If a new top-level module is genuinely needed, add it to ESD.md Section 21 in the same PR that introduces it.
-- Tests live under `tests/{unit,contract,eval,fault_injection}/`, mirroring the module they test, not colocated with source files.
+- Tests live under `tests/{unit,contract,eval,fault_injection,integration}/`, mirroring the module they test, not colocated with source files. `integration` holds DB-backed tests against the dedicated `aegis_test` database (skipped automatically when Postgres is down).
 - No MCP server imports another MCP server's code. They are independently deployable; treat them that way even in local development.
 
 ## 10. Refactoring Guidelines
