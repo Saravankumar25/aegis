@@ -675,9 +675,14 @@ Running the real pipeline surfaced problems the deterministic stub structurally 
 - Live E2E: real 80% error injection on `checkout-service` → real Prometheus/k8s/GitHub MCP
   evidence → 5 real RCA calls → observer-validated hypothesis → Tier-3 `rollback_deploy` proposed
   (correctly *not* auto-executed).
-- **Re-measurement after the grounding fixes is pending free-tier capacity** — the harness now
-  refuses to report numbers it cannot obtain from a real model, so a throttled run fails instead
-  of quietly printing offline results. Re-run: `backend/.venv/Scripts/python.exe eval/run_real_eval.py`.
+- **Re-measurement after the grounding fixes is blocked on quota, not on code.** All four keys
+  returned `Rate limit exceeded: free-models-per-day` — OpenRouter's free tier allows ~50
+  requests/day per account, and this session spent them on model probing, two 36-call corpus runs
+  and the live E2E. The cap resets at UTC midnight; adding ~10 credits to the account raises it to
+  1000/day. The provider now raises a distinct `DailyQuotaExhausted` carrying exactly that
+  guidance, because a daily cap and a per-minute throttle need completely different operator
+  responses and collapsing them sends people to re-run a command that cannot succeed for hours.
+  Re-run when quota returns: `backend/.venv/Scripts/python.exe eval/run_real_eval.py`.
 
 ### Tests
 166 passing. New: `tests/unit/test_grounding.py` (14 — category support, the healthy-pod false

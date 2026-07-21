@@ -40,6 +40,17 @@ class ProviderExhausted(RuntimeError):
     """Every configured model and key was unavailable. No answer is better than a fake one."""
 
 
+class DailyQuotaExhausted(ProviderExhausted):
+    """The account's free-model daily allowance is spent — distinct from momentary throttling.
+
+    Worth its own type because the operator response is completely different: a
+    per-minute throttle clears itself in seconds and the retry sweep handles it,
+    whereas a daily cap needs either a wait until the UTC reset or credits on the
+    account. Collapsing both into "rate limited" sends people to re-run a command
+    that cannot possibly succeed for hours.
+    """
+
+
 class OpenRouterProvider(LLMProvider):
     """OpenAI-compatible chat completions with key rotation and model fallback."""
 
@@ -98,6 +109,15 @@ class OpenRouterProvider(LLMProvider):
             },
         )
         if response.status_code in (401, 402, 429):
+            body_text = response.text[:400]
+            if "free-models-per-day" in body_text or "per-day" in body_text:
+                # A daily cap will not clear on retry; say so precisely.
+                raise DailyQuotaExhausted(
+                    "OpenRouter free-model DAILY quota is exhausted for every configured "
+                    "key. This does not clear on retry: wait for the UTC-midnight reset, "
+                    "add credits to the account to raise the cap, or point "
+                    "LLM_MODEL_RCA/LLM_MODEL_FALLBACKS at a paid model."
+                )
             raise RateLimited(
                 f"{model} key#{key_index % len(self._keys)} -> {response.status_code}"
             )
@@ -121,6 +141,10 @@ class OpenRouterProvider(LLMProvider):
                 attempts += 1
                 try:
                     body = await self._post(model, key_index, prompt, agent, budget)
+                except DailyQuotaExhausted:
+                    # Rotating keys/models cannot help: the cap is account-wide and daily.
+                    self._log.error("llm_daily_quota_exhausted", agent=agent)
+                    raise
                 except RateLimited as exc:
                     self._log.warning("llm_throttled", detail=str(exc), agent=agent)
                     continue
