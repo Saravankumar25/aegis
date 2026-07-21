@@ -443,3 +443,25 @@ K8S_API_URL=https://127.0.0.1:<kind-port> ./.venv/Scripts/python.exe -m mcp_serv
   change could fabricate a change signal). Collector now phrases "repo quiet" without
   change-keywords. This is exactly the class of bug the harness exists to catch.
 - 114 tests passing total.
+
+---
+
+## Milestone 8 — Frontend (dashboard, live incident view, replay)
+
+**Status:** complete.
+
+- Next.js 15 (App Router, TS strict, Tailwind), hand-scaffolded — minimal custom components
+  instead of the full shadcn/ui kit (documented deviation from ESD §5: same Tailwind foundation,
+  shadcn can be layered in without rework; zero `any`, eslint clean).
+- **Dashboard** (`app/dashboard`): incident table push-updated over a new
+  `GET /api/v1/incidents/stream` all-incident SSE endpoint (added to ESD §7 in this change — the
+  list view must be push-updated too; per-incident streams already existed). Live/offline dot
+  reflects the SSE connection.
+- **Live incident view** (`app/incidents/[id]`): hypothesis card (category, confidence,
+  agreement, low-confidence banner per PRD 10A) with **observer-validated citations rendering the
+  redacted snippets**, agent activity feed, state history; refreshed on each SSE event.
+- **Replay** (`app/replay/[id]`, FR-9): prev/next + scrubber over the persisted event sequence;
+  current event shows its full structured detail. Pure API/DB replay — no live infra.
+- **Auth**: login page; httpOnly cookies ride on `credentials: "include"` fetches and
+  `EventSource(withCredentials)`; the frontend never touches a token (ESD §5/§8); 401 → /login.
+- `next build` + `next lint` clean.

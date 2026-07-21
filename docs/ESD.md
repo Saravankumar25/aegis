@@ -243,6 +243,7 @@ All endpoints are versioned under `/api/v1`.
 | `/incidents` | GET | MVP | List incidents, filterable by state/service/severity |
 | `/incidents/{id}` | GET | MVP | Full incident detail |
 | `/incidents/{id}/stream` | GET | MVP | SSE stream of live updates |
+| `/incidents/stream` | GET | MVP | SSE stream of all-incident events (dashboard list view; added M8 — the list must be push-updated too, ESD §5 forbids polling) |
 | `/incidents/{id}/replay` | GET | MVP | Full ordered agent-decision history for replay mode |
 | `/incidents/{id}/approvals` | POST | V1.5 | Approve/reject a Tier-2 proposal. Requires `on_call_engineer` or `admin` role. |
 | `/circuit-breaker/status` | GET | V1.5 | Current state of the global mass-action breaker |

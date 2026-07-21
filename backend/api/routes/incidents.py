@@ -197,6 +197,34 @@ async def _load_detail(session: AsyncSession, incident_id: uuid.UUID) -> Inciden
     )
 
 
+@router.get("/stream")
+async def all_incidents_stream(
+    request: Request,
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """SSE stream of events across all incidents (dashboard list view, ESD §7)."""
+
+    async def stream() -> AsyncIterator[str]:
+        queue = hub.subscribe("*")
+        try:
+            yield ": connected\n\n"
+            while not await request.is_disconnected():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"event: {event['event']}\ndata: {json.dumps(event)}\n\n"
+        finally:
+            hub.unsubscribe("*", queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/{incident_id}", response_model=IncidentDetailOut)
 async def incident_detail(
     incident_id: uuid.UUID,
