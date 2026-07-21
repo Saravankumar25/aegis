@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.security import hash_password
+from api.security import ACCESS_COOKIE, create_access_token
 from db.enums import AlertSource, IncidentState, RemediationStatus, Severity, UserRole
 from db.models import Incident, MemorySummary, RemediationAction, User
 from db.repository import IncidentRepository
@@ -21,15 +21,24 @@ def _now() -> datetime.datetime:
 
 
 async def _login(client: httpx.AsyncClient, session: AsyncSession, role: UserRole) -> None:
+    """Authenticate as ``role``.
+
+    Sign-in is a precondition here, not the subject: these tests are about approvals RBAC.
+    The cookie is minted with the same helper the real exchange uses, so everything from the
+    dependency layer down is the production path. The exchange itself is covered in
+    ``test_auth_api.py``.
+    """
     email = f"{role}@example.com"
-    existing = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if existing is None:
-        session.add(User(email=email, hashed_password=hash_password("test-password-9"), role=role))
+    user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if user is None:
+        user = User(email=email, firebase_uid=f"uid-{role}", role=role)
+        session.add(user)
         await session.commit()
-    response = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": "test-password-9"}
+        await session.refresh(user)
+    client.cookies.set(
+        ACCESS_COOKIE,
+        create_access_token(user_id=str(user.id), role=user.role, email=user.email),
     )
-    assert response.status_code == 200
 
 
 async def _proposed_action(

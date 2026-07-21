@@ -152,7 +152,6 @@ async def test_global_breaker_trips_and_requires_clear(session: AsyncSession):
     assert await is_globally_tripped(session)
 
     admin_id = uuid.uuid4()
-    from api.security import hash_password
     from db.enums import UserRole
     from db.models import User
 
@@ -160,7 +159,7 @@ async def test_global_breaker_trips_and_requires_clear(session: AsyncSession):
         User(
             id=admin_id,
             email="breaker-admin@example.com",
-            hashed_password=hash_password("irrelevant-pw-1"),
+            firebase_uid="uid-breaker-admin",
             role=UserRole.admin,
         )
     )

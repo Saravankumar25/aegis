@@ -111,6 +111,8 @@ export interface User {
   id: string;
   email: string;
   role: string;
+  display_name: string | null;
+  photo_url: string | null;
 }
 
 export function eventSource(path: string): EventSource {

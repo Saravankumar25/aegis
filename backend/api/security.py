@@ -1,9 +1,12 @@
-"""Auth primitives: password hashing, JWT issuance/verification, cookie policy (ESD §8).
+"""Auth primitives: JWT issuance/verification, cookie policy (ESD §8).
 
-Tokens live exclusively in httpOnly cookies (never JavaScript-readable — CLAUDE.md §12).
-Access tokens are short-lived; refresh tokens are opaque-to-the-client JWTs whose ``jti`` is
-stored hashed in ``refresh_sessions`` for rotation + reuse detection. ``bcrypt`` is used
-directly (passlib's wrapper is incompatible with bcrypt≥4.1).
+Aegis issues and owns the session even though identity is federated through Firebase
+(``api.firebase_auth``). Tokens live exclusively in httpOnly cookies, never anywhere
+JavaScript can read them (CLAUDE.md §12). Access tokens are short-lived; refresh tokens are
+opaque-to-the-client JWTs whose ``jti`` is stored hashed in ``refresh_sessions`` for rotation
+and reuse detection.
+
+There are no password primitives here: Aegis never sees, stores, or verifies a password.
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ import hashlib
 import uuid
 from typing import Any
 
-import bcrypt
 from fastapi import Response
 from jose import JWTError, jwt
 
@@ -23,19 +25,6 @@ ALGORITHM = "HS256"
 ACCESS_COOKIE = "aegis_access"
 REFRESH_COOKIE = "aegis_refresh"
 REFRESH_PATH = "/api/v1/auth"
-
-
-def hash_password(password: str) -> str:
-    """Hash a password with bcrypt (cost 12)."""
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
-
-
-def verify_password(password: str, hashed: str) -> bool:
-    """Constant-time bcrypt verification."""
-    try:
-        return bcrypt.checkpw(password.encode(), hashed.encode())
-    except ValueError:
-        return False
 
 
 def _now() -> datetime.datetime:
