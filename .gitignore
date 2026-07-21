@@ -50,3 +50,6 @@ infra/.k8s-mcp-writer-token
 llm-api-keys.txt
 *api-key*
 *apikey*
+
+# TypeScript incremental build artifact
+frontend/tsconfig.tsbuildinfo

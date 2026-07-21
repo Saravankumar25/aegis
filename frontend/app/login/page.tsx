@@ -1,11 +1,9 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("oncall@aegis.dev");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +18,9 @@ export default function LoginPage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      router.push("/dashboard");
+      // Full navigation, not router.push: the shell's UserBadge reads /auth/me on
+      // mount, so a client-side transition would leave it showing "Sign in".
+      window.location.assign("/dashboard");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "login failed");
     } finally {
@@ -28,29 +28,33 @@ export default function LoginPage() {
     }
   }
 
+  const field =
+    "w-full rounded-lg border border-edge bg-bg px-3.5 py-2.5 text-[14px] outline-none transition-colors placeholder:text-muted focus:border-fg/40";
+
   return (
-    <div className="mx-auto mt-24 max-w-sm rounded-xl border border-edge bg-panel p-6">
-      <h1 className="mb-4 text-lg font-semibold">Sign in to Aegis</h1>
+    <div className="mx-auto mt-24 max-w-sm">
+      <h1 className="display mb-1 text-2xl">Sign in</h1>
+      <p className="mb-7 text-[13px] text-muted">Aegis incident response</p>
       <form onSubmit={submit} className="space-y-3">
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="email"
-          className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm"
+          className={field}
         />
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="password"
-          className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm"
+          className={field}
         />
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-[13px] text-danger">{error}</p>}
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded-md bg-sky-600 px-3 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+          className="w-full rounded-lg bg-inverse-bg px-3 py-2.5 text-[14px] font-medium text-inverse-fg transition-opacity hover:opacity-80 disabled:opacity-40"
         >
           {busy ? "Signing in…" : "Sign in"}
         </button>

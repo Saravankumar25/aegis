@@ -31,24 +31,26 @@ export default function ReplayPage() {
     [replay, position],
   );
 
-  if (error) return <p className="text-sm text-red-400">{error}</p>;
-  if (!replay) return <p className="text-sm text-slate-400">Loading replay…</p>;
+  if (error) return <p className="text-[13px] text-danger">{error}</p>;
+  if (!replay) return <p className="text-[13px] text-muted">Loading replay…</p>;
 
   const last = replay.events.length - 1;
+  const stepButton =
+    "rounded-full border border-edge px-4 py-1.5 text-[12px] transition-colors hover:bg-surface2 disabled:opacity-30";
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center gap-3">
         <SeverityBadge severity={replay.incident.severity} />
-        <h1 className="text-xl font-semibold">Replay — {replay.incident.title}</h1>
+        <h1 className="display text-2xl">Replay — {replay.incident.title}</h1>
         <StateBadge state={replay.incident.state} />
       </div>
 
-      <div className="flex items-center gap-3 rounded-xl border border-edge bg-panel p-3">
+      <div className="flex items-center gap-4 rounded-2xl border border-edge bg-surface p-4">
         <button
           onClick={() => setPosition((p) => Math.max(0, p - 1))}
           disabled={position === 0}
-          className="rounded-md border border-edge px-3 py-1 text-sm hover:bg-surface disabled:opacity-40"
+          className={stepButton}
         >
           ← prev
         </button>
@@ -58,44 +60,45 @@ export default function ReplayPage() {
           max={Math.max(last, 0)}
           value={position}
           onChange={(e) => setPosition(Number(e.target.value))}
-          className="flex-1 accent-sky-500"
+          className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-edge accent-fg"
         />
         <button
           onClick={() => setPosition((p) => Math.min(last, p + 1))}
           disabled={position >= last}
-          className="rounded-md border border-edge px-3 py-1 text-sm hover:bg-surface disabled:opacity-40"
+          className={stepButton}
         >
           next →
         </button>
-        <span className="w-20 text-right text-xs text-slate-400">
+        <span className="w-20 text-right font-mono text-[11px] text-muted">
           {position + 1} / {replay.events.length}
         </span>
       </div>
 
       <ol className="space-y-2">
-        {visible.map((event) => (
-          <li
-            key={event.sequence}
-            className={`rounded-lg border p-3 text-sm ${
-              event.sequence === position
-                ? "border-sky-500/60 bg-sky-500/5"
-                : "border-edge bg-panel"
-            }`}
-          >
-            <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
-              <span className="font-mono">#{event.sequence + 1}</span>
-              <span className="uppercase">{event.kind}</span>
-              {event.agent_name && <AgentChip name={event.agent_name} />}
-              <span>{new Date(event.at).toLocaleTimeString()}</span>
-            </div>
-            <p className="text-slate-200">{event.summary}</p>
-            {event.sequence === position && (
-              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-edge bg-surface p-2 text-xs text-slate-400">
-                {JSON.stringify(event.detail, null, 2)}
-              </pre>
-            )}
-          </li>
-        ))}
+        {visible.map((event) => {
+          const current = event.sequence === position;
+          return (
+            <li
+              key={event.sequence}
+              className={`rounded-xl border p-4 transition-colors ${
+                current ? "border-fg/30 bg-surface2" : "border-edge bg-surface"
+              }`}
+            >
+              <div className="mb-1.5 flex flex-wrap items-center gap-3 text-[11px] text-muted">
+                <span className="font-mono">#{event.sequence + 1}</span>
+                <span className="uppercase tracking-[0.14em]">{event.kind}</span>
+                {event.agent_name && <AgentChip name={event.agent_name} />}
+                <span>{new Date(event.at).toLocaleTimeString()}</span>
+              </div>
+              <p className="text-[13.5px] leading-relaxed">{event.summary}</p>
+              {current && (
+                <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-edge bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">
+                  {JSON.stringify(event.detail, null, 2)}
+                </pre>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </div>
   );

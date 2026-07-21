@@ -3,7 +3,7 @@
 // Incident list, push-updated over the all-incident SSE stream (no polling, ESD §5).
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SeverityBadge, StateBadge } from "@/components/badges";
 import { api, ApiError, eventSource, type Incident } from "@/lib/api";
 
@@ -11,7 +11,6 @@ export default function DashboardPage() {
   const [incidents, setIncidents] = useState<Incident[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
-  const sourceRef = useRef<EventSource | null>(null);
 
   const load = useCallback(() => {
     api<Incident[]>("/incidents")
@@ -31,7 +30,6 @@ export default function DashboardPage() {
   useEffect(() => {
     load();
     const source = eventSource("/incidents/stream");
-    sourceRef.current = source;
     source.onopen = () => setLive(true);
     source.onerror = () => setLive(false);
     // Any incident event may change list rows; refetch is cheap and race-free.
@@ -42,6 +40,8 @@ export default function DashboardPage() {
       "alert_merged",
       "hypothesis",
       "investigation_complete",
+      "remediation_proposed",
+      "remediation_executed",
     ]) {
       source.addEventListener(type, refresh);
     }
@@ -50,63 +50,76 @@ export default function DashboardPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Incidents</h1>
+      <div className="mb-7 flex items-end justify-between">
+        <div>
+          <h1 className="display text-3xl">Incidents</h1>
+          <p className="mt-1.5 text-[13px] text-muted">
+            Live investigation feed across Meridian Commerce.
+          </p>
+        </div>
         <span
-          className={`text-xs ${live ? "text-emerald-400" : "text-slate-500"}`}
+          className={`flex items-center gap-1.5 text-[11px] ${live ? "text-ok" : "text-muted"}`}
           title="SSE connection state"
         >
-          ● {live ? "live" : "offline"}
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${live ? "bg-ok" : "bg-muted"}`}
+          />
+          {live ? "live" : "offline"}
         </span>
       </div>
-      {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
+
+      {error && <p className="mb-4 text-[13px] text-danger">{error}</p>}
+
       {incidents === null ? (
-        <p className="text-sm text-slate-400">Loading…</p>
+        <p className="text-[13px] text-muted">Loading…</p>
       ) : incidents.length === 0 ? (
-        <p className="text-sm text-slate-400">
-          No incidents yet. Inject a failure into Meridian to create one.
-        </p>
+        <div className="rounded-2xl border border-edge bg-surface px-6 py-16 text-center">
+          <p className="text-[15px]">No incidents yet</p>
+          <p className="mt-1.5 text-[13px] text-muted">
+            Inject a failure into Meridian and one will appear here within seconds.
+          </p>
+        </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-edge">
-          <table className="w-full text-sm">
-            <thead className="bg-panel text-left text-xs uppercase text-slate-400">
+        <div className="overflow-hidden rounded-2xl border border-edge">
+          <table className="w-full text-[13px]">
+            <thead className="bg-surface text-left text-[10px] uppercase tracking-[0.14em] text-muted">
               <tr>
-                <th className="px-4 py-2">Severity</th>
-                <th className="px-4 py-2">Title</th>
-                <th className="px-4 py-2">Service</th>
-                <th className="px-4 py-2">State</th>
-                <th className="px-4 py-2">Opened</th>
-                <th className="px-4 py-2" />
+                <th className="px-5 py-3 font-medium">Severity</th>
+                <th className="px-5 py-3 font-medium">Incident</th>
+                <th className="px-5 py-3 font-medium">Service</th>
+                <th className="px-5 py-3 font-medium">State</th>
+                <th className="px-5 py-3 font-medium">Opened</th>
+                <th className="px-5 py-3" />
               </tr>
             </thead>
             <tbody>
               {incidents.map((incident) => (
                 <tr
                   key={incident.id}
-                  className="border-t border-edge/60 hover:bg-panel/60"
+                  className="border-t border-edge transition-colors hover:bg-surface"
                 >
-                  <td className="px-4 py-2">
+                  <td className="px-5 py-3.5">
                     <SeverityBadge severity={incident.severity} />
                   </td>
-                  <td className="px-4 py-2">
+                  <td className="px-5 py-3.5">
                     <Link
                       href={`/incidents/${incident.id}`}
-                      className="font-medium text-slate-100 hover:text-sky-300"
+                      className="font-medium transition-opacity hover:opacity-60"
                     >
                       {incident.title}
                     </Link>
                   </td>
-                  <td className="px-4 py-2 text-slate-300">{incident.service_name}</td>
-                  <td className="px-4 py-2">
+                  <td className="px-5 py-3.5 text-muted">{incident.service_name}</td>
+                  <td className="px-5 py-3.5">
                     <StateBadge state={incident.state} />
                   </td>
-                  <td className="px-4 py-2 text-slate-400">
+                  <td className="px-5 py-3.5 text-muted">
                     {new Date(incident.created_at).toLocaleTimeString()}
                   </td>
-                  <td className="px-4 py-2 text-right">
+                  <td className="px-5 py-3.5 text-right">
                     <Link
                       href={`/replay/${incident.id}`}
-                      className="text-xs text-slate-400 hover:text-sky-300"
+                      className="text-[12px] text-muted transition-colors hover:text-fg"
                     >
                       replay →
                     </Link>

@@ -1,34 +1,24 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import "./globals.css";
-import { UserBadge } from "@/components/UserBadge";
+import { AppShell } from "@/components/AppShell";
 
 export const metadata: Metadata = {
-  title: "Aegis — Incident Response",
-  description: "Multi-agent incident response for Meridian Commerce",
+  title: "Aegis — Autonomous incident response",
+  description:
+    "Seven agents that investigate your production incidents in minutes, cite every claim, and remediate only inside explicit safety limits.",
 };
+
+// Applied before first paint so the page never flashes the wrong theme.
+const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem('aegis-theme');if(!t){t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='dark';}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen">
-        <header className="border-b border-edge bg-panel/80 backdrop-blur">
-          <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3">
-            <Link href="/dashboard" className="text-lg font-semibold tracking-tight">
-              <span className="text-sky-400">Aegis</span>{" "}
-              <span className="text-slate-400 text-sm">incident response</span>
-            </Link>
-            <nav className="flex gap-4 text-sm text-slate-300">
-              <Link href="/dashboard" className="hover:text-white">
-                Dashboard
-              </Link>
-            </nav>
-            <div className="ml-auto">
-              <UserBadge />
-            </div>
-          </div>
-        </header>
-        <main className="mx-auto max-w-6xl px-6 py-6">{children}</main>
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
+      <body className="min-h-screen bg-bg text-fg">
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

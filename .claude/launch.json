@@ -7,6 +7,29 @@
       "runtimeArgs": ["run", "dev"],
       "cwd": "frontend",
       "port": 3000
+    },
+    {
+      "name": "aegis-api",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "api.main:app",
+        "--port",
+        "8000",
+        "--reload",
+        "--log-level",
+        "warning"
+      ],
+      "cwd": "backend",
+      "port": 8000
+    },
+    {
+      "name": "aegis-worker",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "worker.main"],
+      "cwd": "backend",
+      "port": 8001
     }
   ]
 }

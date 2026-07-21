@@ -2,6 +2,113 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+  Monochrome design system. Two themes only: pure black and pure white.
+  Values are space-separated RGB triplets so Tailwind opacity modifiers work
+  (bg-surface/60 etc). There is deliberately no brand hue — the only chromatic
+  values in the entire system are the severity ramp (red → amber), which an
+  incident tool cannot express in greyscale without losing meaning.
+*/
+
+:root,
+:root[data-theme="light"] {
+  --bg: 255 255 255;
+  --surface: 250 250 250;
+  --surface-2: 244 244 244;
+  --edge: 226 226 226;
+  --fg: 10 10 10;
+  --muted: 110 110 110;
+  --inverse-bg: 10 10 10;
+  --inverse-fg: 255 255 255;
+
+  --sev-1: 190 30 30;
+  --sev-2: 176 92 12;
+  --sev-3: 148 118 10;
+  --sev-4: 110 110 110;
+  --ok: 22 122 76;
+  --warn: 176 92 12;
+  --danger: 190 30 30;
+}
+
+:root[data-theme="dark"] {
+  --bg: 0 0 0;
+  --surface: 10 10 10;
+  --surface-2: 18 18 18;
+  --edge: 35 35 35;
+  --fg: 245 245 245;
+  --muted: 138 138 138;
+  --inverse-bg: 255 255 255;
+  --inverse-fg: 10 10 10;
+
+  --sev-1: 248 113 113;
+  --sev-2: 251 165 96;
+  --sev-3: 231 202 108;
+  --sev-4: 150 150 150;
+  --ok: 110 214 165;
+  --warn: 251 165 96;
+  --danger: 248 113 113;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: 0 0 0;
+    --surface: 10 10 10;
+    --surface-2: 18 18 18;
+    --edge: 35 35 35;
+    --fg: 245 245 245;
+    --muted: 138 138 138;
+    --inverse-bg: 255 255 255;
+    --inverse-fg: 10 10 10;
+    --sev-1: 248 113 113;
+    --sev-2: 251 165 96;
+    --sev-3: 231 202 108;
+    --sev-4: 150 150 150;
+    --ok: 110 214 165;
+    --warn: 251 165 96;
+    --danger: 248 113 113;
+  }
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+}
+
 body {
-  @apply bg-surface text-slate-200 antialiased;
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font-family:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Apple-ish display type: tight tracking that scales with size. */
+.display {
+  letter-spacing: -0.035em;
+  line-height: 1.03;
+  font-weight: 600;
+}
+
+.reveal {
+  animation: reveal 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .reveal {
+    animation: none;
+  }
 }

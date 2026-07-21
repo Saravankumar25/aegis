@@ -9,21 +9,30 @@ each piece. Source-of-truth hierarchy: PRD.md → ESD.md → CLAUDE.md → this 
 
 ## Current status / resume here (as of 2026-07-21)
 
-**MVP COMPLETE and verified end-to-end** (M0-M8; see Feature Log Entry 5 and the milestone
-sections below). 114 backend tests + eval harness green; live E2E: injected checkout failure →
-webhook → 4-agent investigation over real MCP stdio → observer-validated hypothesis → dashboard /
-live view / replay verified in the browser.
+**MVP and V1.5 are both COMPLETE and verified end-to-end.** 148 backend tests + the eval
+harness pass; ruff clean; frontend `next build` / `next lint` / `tsc --noEmit` clean.
 
-**Now building V1.5** (safe autonomous action): safety substrate (leases, breakers, kill switch)
-→ k8s write tools + Resolution agent → approvals API + Communication agent + memory → V1.5
-frontend. Every autonomous-action feature ships with its safety mechanism in the same commit
-(CLAUDE.md §2).
+Live-verified this session: an injected checkout failure produced a 4-agent investigation over
+real MCP stdio ending in an observer-validated hypothesis; a Tier-2 scale proposal was approved
+through the API and executed by the worker against the real kind cluster (2→3 replicas), then
+its compensating action restored 2→3→2 and resolution drafted a memory summary pending human
+approval.
+
+**Anything next is V2+ scope** — start with the CLAUDE.md §2 architecture review. The open
+follow-ups worth knowing: real LLM providers behind `providers/factory.py` (the eval harness now
+exists to measure them), a LangGraph Postgres checkpointer (deliberately deferred — see the ESD
+§25 row; V1.5 runs now have side effects, so this is the first thing to revisit), rolling
+`audit_log` partition maintenance, and the public demo deployment (ESD §18).
 
 **Environment quick-start:** `docker compose up -d` (Postgres :5433) · kind cluster `aegis`
-(`bash infra/setup-cluster.sh` if gone; `gen-mcp-credentials.sh` re-mint each session, prints
-K8S_API_URL) · API `uvicorn api.main:app --port 8000` · worker `python -m worker.main` ·
-frontend `npm run dev` in frontend/ · seed: `python -m db.seed`, `python -m rag.seed` (local
-password `aegis-local-dev`).
+(`bash infra/setup-cluster.sh` if gone) · `bash infra/gen-mcp-credentials.sh` **each session**
+(tokens live 24h; prints the current `K8S_API_URL` — kind's port changes if the cluster is
+rebuilt) · API `uvicorn api.main:app --port 8000` · worker `python -m worker.main` · frontend
+`npm run dev` · seed `python -m db.seed` + `python -m rag.seed` (local password
+`aegis-local-dev`). All three processes are also defined in `.claude/launch.json`.
+
+**Gotcha:** never run `next build` while the dev server is up — it corrupts `.next` and the app
+serves unstyled HTML until you stop the server, `rm -rf .next`, and restart.
 
 ---
 
@@ -576,3 +585,36 @@ Triggers: **new autonomous action types** (restart pod, scale deployment), **new
 - **Tests: 148 passing** (communication templates ×3, slack/pagerduty contract ×3, V1.5 API ×8:
   RBAC, approval flow incl. double-decide 409, rejection→manual-resolve, expiry, kill-switch role
   split, breaker trip/clear via API, memory draft→gate→scoped recall, edit-field whitelist).
+
+## V1.5d — V1.5 frontend, monochrome design system, marketing homepage
+
+**Status:** complete. **V1.5 is complete.**
+
+- **Design system rebuild** (`globals.css` + `tailwind.config.ts`): two themes only — **pure
+  black (#000) and pure white** — expressed as CSS-variable RGB triplets so Tailwind opacity
+  modifiers keep working (`bg-surface/60`). Semantic class vocabulary (`bg`, `surface`,
+  `surface2`, `edge`, `fg`, `muted`, `inverse-bg/fg`) is shared by both themes, so no component
+  branches on theme. **Zero blue/indigo/sky/violet/cyan/teal in the codebase** (grep-verified);
+  the only chromatic values are the P1→P4 severity ramp and ok/danger — an incident tool that
+  renders P1 and P4 identically has thrown away information the operator needs.
+- **Theme switch** (`ThemeToggle`): writes `<html data-theme>` + localStorage; an inline script
+  in `layout.tsx` applies the stored choice **before first paint**, so there is no flash of the
+  wrong theme. Falls back to the OS `prefers-color-scheme` on first visit.
+- **Marketing homepage** (`app/page.tsx`, public, Apple-style): sticky translucent nav, hero at
+  `clamp(2.75rem, 8vw, 6.5rem)` with tight tracking, a **CSS-drawn product still** (no
+  screenshots to go stale, renders correctly in both themes), numbers band, four-step
+  "how it works", a cited-evidence panel, the four safety gates, the agent cast, and a closing
+  CTA. `AppShell` detects `/` and steps aside so marketing renders its own chrome.
+- **V1.5 app surfaces**: approvals queue (reasoning + blast radius + the documented undo, with
+  role-gated buttons — cosmetic only, the server enforces), safety page (kill switch + breaker;
+  red used *only* where the meaning is literally "stop"), and a "Mark resolved" action on the
+  incident view.
+- **Bug found and fixed during visual verification:** after login the header still showed
+  "Sign in" — `router.push` kept the shell mounted, so `UserBadge`'s mount-time `/auth/me` never
+  re-ran. Login now does a full navigation.
+- **Also hit:** running `next build` against a live dev server corrupts its `.next` cache
+  (`ENOENT vendor-chunks/next.js`, page renders unstyled). Fix: stop the server, `rm -rf .next`,
+  restart. Worth knowing before assuming a CSS regression.
+- Verified in-browser in both themes: marketing homepage, dashboard (real incidents from the
+  live E2E runs), incident detail with observer-validated citations. `next build`, `next lint`,
+  `tsc --noEmit` all clean; backend still 148 passing, ruff clean.

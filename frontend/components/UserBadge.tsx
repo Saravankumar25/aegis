@@ -14,14 +14,14 @@ export function UserBadge() {
 
   if (!user) {
     return (
-      <a href="/login" className="text-sm text-sky-400 hover:underline">
+      <a href="/login" className="text-[12px] text-muted transition-colors hover:text-fg">
         Sign in
       </a>
     );
   }
   return (
-    <span className="text-xs text-slate-400">
-      {user.email} · <span className="uppercase">{user.role}</span>
+    <span className="hidden text-[11px] text-muted sm:inline">
+      {user.email} · {user.role.replace(/_/g, " ")}
     </span>
   );
 }
