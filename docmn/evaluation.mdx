@@ -1,0 +1,36 @@
+# Evaluation and testing
+
+Evaluation answers two different questions: “does the deterministic system still obey its contracts?” and “how useful is retrieval/reasoning on a known scenario?” Keep those questions separate when interpreting results.
+
+## Test layers
+
+| Layer | Scope |
+| --- | --- |
+| Unit | Agent decisions, state machine, redaction, prompts, provider/schema parsing, guardrails, caching, safety controls, tracing. |
+| Integration | API/auth, ingestion, middleware, pipeline, RAG retrieval/quality, worker claim/reliability, resolution and safety. |
+| Contract | Kubernetes, Prometheus, GitHub, and Slack integration shapes using fixtures. |
+| Fault injection | MCP degradation behavior. |
+| Evaluation | RCA accuracy test plus external synthetic-evaluation assets. |
+
+The test suite is not merely a product demonstration: it encodes safety and anti-fabrication behavior, including Observer validation, secret redaction, endpoint role checks, tool allowlisting, provider degradation, and remediation bounds.
+
+## Evaluation assets
+
+`eval/synthetic_incidents` contains scenarios for payment, checkout, and catalog failures such as crash loops, latency, deploy regression, cache misses, dependency failure, and injected logs. `eval/runbooks` contains the corpus used for operational retrieval cases. Scenario validation verifies the fixture structure before evaluation.
+
+`backend/evaluation/retrieval_metrics.py` supplies deterministic retrieval measurements. `backend/evaluation/ragas_metrics.py` and `judge.py` expose RAGAS/judge paths, while calibration/dataset code supports evaluation data handling. The operational record states that RAGAS has not yet been executed because it needs the optional dependencies and a judge model; do not represent a RAGAS score as available.
+
+## Running checks
+
+```powershell
+cd backend
+pytest
+ruff check .
+```
+
+For evaluation helpers, run from the repository root using the documented scripts after configuring their dependencies. Real-evaluation runs use actual model/provider capacity and should be treated as usage-bearing operations.
+
+> [!NOTE]
+> A passing deterministic retrieval gate is evidence about the checked-in corpus and expected ranking cases. It is not a general guarantee that every future incident will retrieve the right runbook or that the model’s conclusion is correct.
+
+Related: [AI system](./ai-system.mdx#honest-limitations) and [Data, RAG, and memory](./data-and-rag.mdx#retrieval-pipeline).

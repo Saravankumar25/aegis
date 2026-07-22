@@ -1,0 +1,67 @@
+# Aegis documentation
+
+> [!TIP]
+> New to Aegis? Read [What happens during an incident](./using-aegis.mdx#what-happens-during-an-incident) before setting up the development environment.
+
+Aegis is a local-first incident-response system for the simulated **Meridian Commerce** Kubernetes environment. It turns an alert into an investigation that a human can inspect: what was observed, which tools were used, what root cause is suspected, and which evidence supports each claim.
+
+Aegis exists to make the early minutes of an incident less manual and less opaque. Instead of making an operator jump between Kubernetes, Prometheus, GitHub, runbooks, and chat, it gathers bounded evidence, records its reasoning trail, and keeps a human in charge of consequential changes.
+
+It is designed for on-call engineers investigating an incident, platform/SRE engineers operating the environment, AI engineers evaluating grounded agent behavior, and contributors extending the system.
+
+This portal describes the checked-in implementation. It does not promise planned capabilities.
+
+## Start here
+
+- [Getting started](./getting-started.mdx) — run the local services and UI.
+- [Architecture](./architecture.mdx) — components, request flow, and incident lifecycle.
+- [AI system](./ai-system.mdx) — agents, LangGraph, prompts, guardrails, and limits.
+- [API reference](./api-reference.mdx) — authenticated HTTP and SSE endpoints.
+- [Operations](./operations.mdx) — deployment, observability, and troubleshooting.
+- [Using Aegis](./using-aegis.mdx) — incident workflow for operators and approvers.
+
+## Choose your path
+
+| I want to… | Start with |
+| --- | --- |
+| Understand whether Aegis is useful for my on-call workflow | [Using Aegis](./using-aegis.mdx) |
+| Run it locally | [Getting started](./getting-started.mdx) |
+| Understand its safety model | [Security and safety](./security-and-safety.mdx) |
+| Integrate with the API or dashboard | [API reference](./api-reference.mdx) |
+| Work on the system itself | [Architecture](./architecture.mdx) then [Contributing](./contributing.mdx) |
+
+## What is implemented
+
+| Area | Implemented behavior |
+| --- | --- |
+| Investigation | Triage, Correlation, RCA ensemble, Observer validation, and supervisor-controlled routing. |
+| Evidence | Read-only Kubernetes, Prometheus, and GitHub tool calls, persisted citations, redaction, and prompt delimiting. |
+| Remediation | `restart_pod` (Tier 1), `scale_deployment` (Tier 2), and human-only `rollback_deploy` (Tier 3). |
+| User experience | Next.js dashboard, per-incident/all-incident SSE, approvals, replay, and safety controls. |
+| Security | Firebase Google identity exchange, Aegis httpOnly session cookies, server-side role checks, Redis rate limits. |
+| Knowledge | PostgreSQL/pgvector runbook retrieval, optional cross-encoder reranking, approved incident memory. |
+
+## Important current limits
+
+- The environment is designed for one laptop and a local `kind` cluster; it is not a production deployment manifest for Aegis itself.
+- Real LLM credentials are mandatory. There is no mock or offline model provider.
+- `RAG_MIN_SCORE` defaults to the calibrated reranker-logit floor `-11.0`; it applies only when reranking runs.
+- LangSmith emits traces only when configured. RAGAS support is wired but has not been executed by the repository’s documented status.
+- Tier-1 remediation is in shadow mode by default. Tier-3 remediation is never machine-executed.
+
+> [!WARNING]
+> Aegis is not an authority that replaces incident command. A validated citation means the Observer found evidence support for a claim; it does not make a model-produced diagnosis certain. Review the evidence and safety state before approving a change.
+
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| `backend/` | FastAPI API, worker, LangGraph graph, agents, MCP clients/servers, models, migrations, tests. |
+| `frontend/` | Next.js dashboard and Firebase sign-in exchange client. |
+| `infra/` | `kind`, Meridian service manifests, Prometheus values, cluster helpers, RBAC. |
+| `eval/` | Synthetic incidents, runbooks, scenario validation, and real-evaluation runner. |
+| `docs/` | Project requirements, engineering design, and build log; useful context but not this portal’s source of truth. |
+
+## Reading paths
+
+New engineers should read [Getting started](./getting-started.mdx), then [Architecture](./architecture.mdx), [AI system](./ai-system.mdx), and [Data, RAG, and memory](./data-and-rag.mdx). Operators should begin with [Operations](./operations.mdx) and [Security and safety](./security-and-safety.mdx).

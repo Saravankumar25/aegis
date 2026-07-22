@@ -1,0 +1,35 @@
+# FAQ
+
+For step-by-step actions, use [Using Aegis](./using-aegis.mdx). This page answers the common “what does that mean?” questions.
+
+## Is Aegis fully autonomous?
+
+No. It is autonomous in investigation and can execute only a narrowly catalogued Tier-1 action after deterministic gates; Tier-1 is shadowed by default. Tier-2 needs human approval and Tier-3 is never machine-executed.
+
+## Does it use real AI calls?
+
+Yes. The implementation uses OpenRouter or Gemini and deliberately provides no offline/stub provider. Unavailable provider paths degrade only where coded fallbacks exist.
+
+## Is every RCA guaranteed correct?
+
+No. The Observer validates citation/evidence mechanics and can semantically veto, but current documented limits include no default RAG relevance floor and unexecuted RAGAS harness results. Review cited evidence and confidence.
+
+## Does the frontend store bearer tokens?
+
+No. Firebase’s one-time identity token remains in memory, is exchanged for Aegis httpOnly cookies, and Firebase is signed out immediately afterward.
+
+## Can Redis data loss lose an incident?
+
+No. Incidents and audit records are in PostgreSQL. Redis backs cache and rate limits only.
+
+## How are old investigations replayed?
+
+The replay endpoint reconstructs transitions, agent steps, messages, and citations from persisted database rows; it does not require live infrastructure.
+
+## What is the difference between a citation and a runbook result?
+
+A runbook result is retrieval context: a relevant section of documentation offered to RCA. A citation is the durable link from an agent step to a specific evidence reference/snippet. The Observer validates claims against collected evidence; an operator should inspect both citations and retrieved context.
+
+## Why does an incident sometimes end as escalated?
+
+`escalated` is terminal for automation. It means the bounded investigation could not reach a sufficiently supported path forward; it intentionally distinguishes “needs human attention” from an incident that is still being investigated.

@@ -1,0 +1,53 @@
+# Deployment, observability, and troubleshooting
+
+Use this page when you operate the local demo environment, diagnose a runtime issue, or need to understand what Aegis records about an investigation. For operator actions during an incident, see [Using Aegis](./using-aegis.mdx).
+
+## Local infrastructure
+
+The supplied Compose stack runs Postgres/pgvector and Redis. `infra/setup-cluster.sh` sets up the local `kind` environment; `infra/kind/cluster.yaml` provides the cluster configuration. Meridian’s application and service resources are defined under `infra/manifests/meridian-services.yaml`. `infra/inject-failure.sh` supports controlled failure scenarios. Prometheus settings are in `infra/kube-prometheus-stack/values.yaml`, including short local retention and NodePort exposure.
+
+Use `infra/gen-mcp-credentials.sh` to mint the Kubernetes MCP credential material referenced by the environment. Keep generated token and CA files local and outside version control.
+
+## Health and telemetry
+
+The backend exposes operational endpoints through FastAPI (including health/metrics routes in the application main module). Redis stats report connected clients, memory, keyspace hits/misses, hit rate when calculable, and uptime. Structured logs include incident correlation where applicable.
+
+LangSmith is opt-in through `LANGSMITH_API_KEY`, project, and endpoint. When configured, graph agent steps and provider calls are traced with incident/service tags, prompt references, model attribution, token usage, cost where available, latency, and schema repair metadata. All tracing helpers fail closed to no-op from the application’s perspective: a tracing outage does not stop an incident.
+
+## Operational checks
+
+```powershell
+# API dependencies
+Invoke-RestMethod http://localhost:8000/health
+
+# Authenticated counters (supply your session in a real client)
+# GET http://localhost:8000/api/v1/metrics
+```
+
+The metrics response combines three useful views: incident counts grouped by lifecycle state, aggregate persisted LLM step/tokens/cost/mean latency, and Redis statistics. It is not a public Prometheus scrape endpoint; it is authenticated because those figures reveal operational activity.
+
+## Evaluation
+
+The repository includes deterministic retrieval metrics and a CI-style retrieval quality test suite, synthetic incident JSON cases, and Markdown runbooks. `eval/scenario_validation.py` validates scenario data; `eval/run_real_eval.py` supports a real evaluation run. RAGAS support is present as an optional harness and judge integration, but the repository explicitly records it as unexecuted. See [Evaluation](./evaluation.mdx).
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Backend import errors after setup | Confirm the venv uses Python 3.12, recreate only the virtual environment if necessary. |
+| No investigation begins | Confirm worker process is running, database migration is current, and the incident is claimable rather than locked by a live worker. |
+| Model calls fail | Verify `LLM_PROVIDER` and its configured key pool. Aegis intentionally has no fake provider. Some agents use deterministic fallback; not every LLM task can produce a full result. |
+| No evidence from Kubernetes | Confirm `kind`, API URL, token/CA paths, namespace, and MCP RBAC credential generation. |
+| Dashboard appears stale | Verify backend URL, authenticated cookies, and SSE connection; streams have 15-second keepalives. |
+| Cannot approve/resolve | Inspect `/auth/me`; only on-call/admin may act, and Tier-3 cannot be machine-approved. |
+| Action does not execute | Read the stored action/audit state: kill switch, expiry, tier approval, Observer verdict, blast radius, breaker, or lease can refuse it. |
+| No LangSmith traces | Set API key and verify egress; no key makes tracing intentionally inert. |
+| RAG gives unrelated material | Confirm reranking is enabled so the calibrated `RAG_MIN_SCORE=-11.0` floor applies; also use service filters and inspect citations. |
+
+## Backup and recovery scope
+
+The code treats Postgres as authoritative. Back up/restore it using normal PostgreSQL procedures; Redis loss affects cache and rate-limit counters but not canonical incidents/audits. This repository does not include a production Aegis backup automation or a multi-node/high-availability deployment topology.
+
+## Escalation checklist
+
+When an investigation cannot progress, capture the incident id, current state, latest agent step, Observer verdict, evidence gaps, and action gate refusal (if any). These are persisted specifically so a human can continue from the recorded state rather than reconstructing the investigation from transient logs.

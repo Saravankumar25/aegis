@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 
 import httpx
+import pytest
 
 from mcp_servers.k8s.client import K8sClient
 
@@ -70,11 +72,102 @@ async def test_list_events_parses_warning(load_fixture, mock_client):
             )
         )
     )
-    events, _ = await client.list_events("meridian")
+    # `within_minutes=0` disables the recency window. The fixture's timestamps are fixed, so
+    # without this the parse assertions would silently become assertions about the clock.
+    events, _ = await client.list_events("meridian", within_minutes=0)
     warning = events[0]
     assert warning.type == "Warning" and warning.reason == "BackOff"
     assert warning.involved_object == "Pod/payment-service-7c9d4f5b6a-q8w3e"
     assert warning.count == 12
+
+
+def _events_payload(entries: list[dict]) -> dict:
+    return {
+        "kind": "EventList",
+        "apiVersion": "v1",
+        "items": [
+            {
+                "type": e.get("type", "Warning"),
+                "reason": e.get("reason", "Unhealthy"),
+                "message": e.get("message", "Readiness probe failed"),
+                "involvedObject": {"kind": "Pod", "name": e.get("pod", "checkout-abc")},
+                "count": 1,
+                "lastTimestamp": e["ts"],
+            }
+            for e in entries
+        ],
+    }
+
+
+def _iso(minutes_ago: float) -> str:
+    stamp = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=minutes_ago)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def test_stale_events_are_excluded_from_the_default_window(mock_client):
+    """Regression: a host resume restarted every pod, and the resulting probe failures were
+    still returned 33 minutes later. RCA read them as present instability and reported the
+    service unstable when the injected fault was something else entirely."""
+    payload = _events_payload(
+        [
+            {"ts": _iso(2), "reason": "OOMKilling", "pod": "checkout-now"},
+            {"ts": _iso(33), "reason": "Unhealthy", "pod": "checkout-stale"},
+        ]
+    )
+    client = K8sClient(
+        http=mock_client(_handler_for({"/api/v1/namespaces/meridian/events": payload}))
+    )
+    events, _ = await client.list_events("meridian", within_minutes=15)
+    assert [e.reason for e in events] == ["OOMKilling"]
+
+
+async def test_a_wider_window_can_be_requested_deliberately(mock_client):
+    payload = _events_payload(
+        [{"ts": _iso(2), "reason": "OOMKilling"}, {"ts": _iso(33), "reason": "Unhealthy"}]
+    )
+    client = K8sClient(
+        http=mock_client(_handler_for({"/api/v1/namespaces/meridian/events": payload}))
+    )
+    events, _ = await client.list_events("meridian", within_minutes=60)
+    assert len(events) == 2
+
+
+async def test_events_are_returned_newest_first(mock_client):
+    """A truncated evidence block must keep the most relevant end."""
+    payload = _events_payload(
+        [
+            {"ts": _iso(9), "reason": "Older"},
+            {"ts": _iso(1), "reason": "Newest"},
+            {"ts": _iso(5), "reason": "Middle"},
+        ]
+    )
+    client = K8sClient(
+        http=mock_client(_handler_for({"/api/v1/namespaces/meridian/events": payload}))
+    )
+    events, _ = await client.list_events("meridian", within_minutes=15)
+    assert [e.reason for e in events] == ["Newest", "Middle", "Older"]
+
+
+@pytest.mark.parametrize("bad_timestamp", [None, "", "not-a-date"])
+async def test_events_without_a_usable_timestamp_are_kept(mock_client, bad_timestamp):
+    """ "Unknown when" must not mean "discard". Dropping evidence because its shape changed
+    would hide real events, which is a worse failure than including something stale."""
+    payload = _events_payload([{"ts": _iso(1), "reason": "Recent"}])
+    payload["items"].append(
+        {
+            "type": "Warning",
+            "reason": "NoTimestamp",
+            "message": "something happened",
+            "involvedObject": {"kind": "Pod", "name": "checkout-abc"},
+            "count": 1,
+            "lastTimestamp": bad_timestamp,
+        }
+    )
+    client = K8sClient(
+        http=mock_client(_handler_for({"/api/v1/namespaces/meridian/events": payload}))
+    )
+    events, _ = await client.list_events("meridian", within_minutes=15)
+    assert "NoTimestamp" in [e.reason for e in events]
 
 
 async def test_list_deployments_parses_replica_health(load_fixture, mock_client):

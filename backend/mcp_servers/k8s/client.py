@@ -12,6 +12,7 @@ the credential files entirely.
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 from pathlib import Path
@@ -55,6 +56,26 @@ class UnsafeResourceName(ValueError):
     protection resting on one binding being correct forever, and bindings drift. This makes
     the tool layer refuse to construct the request at all.
     """
+
+
+def _event_is_recent(event: EventSummary, cutoff: datetime.datetime) -> bool:
+    """Whether an event happened after ``cutoff``.
+
+    Unparseable or absent timestamps return True — see `list_events` for why "unknown when"
+    must not mean "discard".
+    """
+    raw = event.last_timestamp
+    if not raw:
+        return True
+    try:
+        # Kubernetes emits RFC 3339 with a literal Z, which fromisoformat rejects before 3.11
+        # and accepts after; normalising keeps this independent of that.
+        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return parsed >= cutoff
 
 
 def _validate_name(value: str, *, kind: str) -> str:
@@ -171,8 +192,27 @@ class K8sClient:
         )
         return logs, attempts
 
-    async def list_events(self, namespace: str) -> tuple[list[EventSummary], int]:
+    async def list_events(
+        self, namespace: str, within_minutes: int | None = None
+    ) -> tuple[list[EventSummary], int]:
+        """Namespace events, newest first, restricted to a recent window by default.
+
+        The window is the point. Kubernetes retains events for an hour by default, and an
+        unfiltered list mixes what is happening *now* with whatever happened when the cluster
+        was last restarted. Observed live: every pod restarted when the host resumed from
+        sleep, and the resulting "Readiness probe failed / connection refused" events were
+        still returned 33 minutes later — RCA read them as current instability and reported
+        the service as unstable when the injected fault was something else entirely.
+
+        Events with no parseable timestamp are KEPT rather than dropped. A missing timestamp
+        means "we do not know when this happened", and silently discarding evidence on that
+        basis is a worse failure than including something stale — the alternative hides real
+        events whenever an event shape changes.
+        """
         _validate_name(namespace, kind="namespace")
+        window = (
+            get_settings().k8s_event_window_minutes if within_minutes is None else within_minutes
+        )
         response, attempts = await self._get(
             f"/api/v1/namespaces/{namespace}/events", tool="list_events", params={"limit": 200}
         )
@@ -181,6 +221,12 @@ class K8sClient:
             events = [_event_summary(item) for item in body["items"]]
         except (KeyError, TypeError, ValidationError) as exc:
             raise MalformedResponseError(f"unexpected event list shape: {exc}") from exc
+
+        if window > 0:
+            cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=window)
+            events = [e for e in events if _event_is_recent(e, cutoff)]
+        # Newest first: a truncated evidence block should keep the most relevant end.
+        events.sort(key=lambda e: e.last_timestamp or "", reverse=True)
         return events, attempts
 
     async def list_deployments(self, namespace: str) -> tuple[list[DeploymentSummary], int]:

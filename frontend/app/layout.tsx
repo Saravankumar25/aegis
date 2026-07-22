@@ -9,7 +9,13 @@ export const metadata: Metadata = {
 };
 
 // Applied before first paint so the page never flashes the wrong theme.
-const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem('aegis-theme');if(!t){t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='dark';}})();`;
+//
+// Mirrors lib/theme.ts `resolveTheme`: the stored value is a *preference* of
+// dark | light | system, and `system` (or anything unrecognised, or no value at all) resolves
+// against the OS query here rather than at hydration. Inlined rather than imported because it
+// must run before React exists — the duplication is deliberate and the two must be changed
+// together, which is why both sides name the same three values explicitly.
+const THEME_SCRIPT = `(function(){try{var p=localStorage.getItem('aegis-theme');var t=(p==='dark'||p==='light')?p:(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='dark';}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

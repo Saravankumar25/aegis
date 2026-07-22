@@ -1,0 +1,76 @@
+# API reference
+
+Base path: `http://localhost:8000/api/v1`. API responses use Pydantic schemas; errors use the Aegis error envelope where raised. Session-bearing browser calls must include credentials.
+
+`GET /health` and `GET /api/v1/health` are public dependency checks: Postgres failure returns 503, while Redis failure reports a 200 `degraded` status because Redis is non-authoritative. `GET /metrics` and `GET /api/v1/metrics` require an authenticated user and return incident-by-state, aggregate LLM, and Redis counters.
+
+> [!TIP]
+> In local development, FastAPI’s interactive OpenAPI UI is available at `/docs` unless `ENVIRONMENT` is `production` or `prod`. It is intentionally disabled in those environments.
+
+## Authentication
+
+| Method and path | Auth | Purpose |
+| --- | --- | --- |
+| `POST /auth/session` | Firebase ID token body | Verify identity and set Aegis access/refresh cookies. |
+| `POST /auth/refresh` | Refresh cookie | Rotate refresh session and set fresh cookies. |
+| `POST /auth/logout` | Session/refresh cookies | Revoke/clear session; returns 204. |
+| `GET /auth/me` | Any Aegis user | Current user id, email, role, display name, photo URL. |
+
+`POST /auth/session` accepts `{"id_token":"<Firebase ID token>"}`. Do not put an Aegis cookie token in JavaScript storage.
+
+## Incidents
+
+| Method and path | Auth | Purpose |
+| --- | --- | --- |
+| `POST /incidents` | Webhook token if configured | Create or idempotently return an alert incident. |
+| `GET /incidents` | Authenticated user | List incidents; supports state/filter pagination defined by the route. |
+| `GET /incidents/stream` | Authenticated user | All-incident SSE stream. |
+| `GET /incidents/{id}` | Authenticated user | Full incident with transitions, steps, messages, citations. |
+| `GET /incidents/{id}/stream` | Authenticated user | Per-incident SSE stream; begins with `snapshot`. |
+| `POST /incidents/{id}/resolve` | On-call/admin | Legal human resolution and draft memory summary. |
+| `GET /incidents/{id}/replay` | Authenticated user | Persisted, chronologically ordered transitions, steps, and messages. |
+
+Alert ingestion is database-idempotent by `(alert_source, external_alert_id)`. Its accepted request schema includes alert source/id, title, service, severity, plus optional alert kind/value carried into triage. Ingestion returns an incident identity/status result rather than running the investigation synchronously.
+
+Example alert shape, using only the fields implemented by the ingestion schema:
+
+```json
+{
+  "alert_source": "prometheus",
+  "external_alert_id": "payment-service-crashloop-42",
+  "title": "payment-service pods are restarting",
+  "service_name": "payment-service",
+  "severity": "P2",
+  "alert_kind": "crashloop"
+}
+```
+
+> [!NOTE]
+> Include `X-Aegis-Webhook-Token` only when `INGEST_WEBHOOK_TOKEN` is configured. A changed `external_alert_id` represents a different alert to the idempotency constraint.
+
+SSE frames use named events and JSON data. The streams send comment keepalives every 15 seconds when idle; clients should reconnect with normal `EventSource` behavior.
+
+## Runbooks and memory
+
+| Method and path | Auth | Purpose |
+| --- | --- | --- |
+| `GET /runbooks/search?q=…&k=…&service=…&rerank=…` | Authenticated user | Hybrid runbook chunk search. `q` is 2–500 chars; `k` is 0–20 (0 uses config). |
+| `GET /memory/pending` | Any authenticated role | Pending draft summaries. |
+| `POST /memory/{summary_id}/approve` | On-call/admin | Approve a summary; optional `edits` may contain only symptom, root_cause, fix, outcome. |
+
+## Remediation and safety controls
+
+| Method and path | Auth | Purpose |
+| --- | --- | --- |
+| `GET /actions/approvals` | Any authenticated role | Unexpired Tier-2+ proposed action queue. |
+| `POST /actions/incidents/{id}/approvals` | On-call/admin | Body: `{"action_id":"uuid","decision":"approved|rejected","notes":"optional"}`. Tier-3 cannot be approved for machine execution. |
+| `GET /actions/circuit-breaker/status` | Any authenticated role | Breaker trip/window counts. |
+| `POST /actions/circuit-breaker/clear` | Admin | Clear breaker records. |
+| `GET /actions/kill-switch` | Any authenticated role | Durable current safety state. |
+| `POST /actions/kill-switch` | On-call/admin (disengage admin-only) | Body: `{"engaged":true}`. |
+
+Common application outcomes include 401/403 authentication/authorization failures, 404 absent resources, 409 invalid incident/proposal state or expiry, and 422 input validation failures. A decision is always persisted/audited before the worker considers execution.
+
+## Browser integration notes
+
+The bundled frontend shows the intended browser pattern: call the API with `credentials: "include"`, use an `EventSource` configured with credentials for live updates, and never store an Aegis token in local storage. See [Security and safety](./security-and-safety.mdx#authentication-and-roles).

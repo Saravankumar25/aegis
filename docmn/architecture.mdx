@@ -1,0 +1,108 @@
+# Architecture
+
+This page explains the system from the outside in. Start with the system view; use [AI system](./ai-system.mdx) for the reasoning details and [Data, RAG, and memory](./data-and-rag.mdx) for the stored data.
+
+## System view
+
+```mermaid
+flowchart LR
+  Alert[Alert webhook] --> API[FastAPI /api/v1]
+  API --> PG[(PostgreSQL + pgvector)]
+  API --> SSE[SSE hub]
+  Worker[Worker reconciliation loop] --> PG
+  Worker --> Graph[LangGraph investigation]
+  Graph --> MCP[MCP gateway]
+  MCP --> K8s[Kubernetes]
+  MCP --> Prom[Prometheus]
+  MCP --> GH[GitHub]
+  Graph --> LLM[OpenRouter or Gemini]
+  Graph --> PG
+  UI[Next.js dashboard] --> API
+  UI --> SSE
+  API <--> Redis[(Redis cache / rate limiter)]
+```
+
+PostgreSQL is the durable source of truth. Redis is deliberately non-authoritative: cache failures are tolerated, and the rate limiter fails open if Redis is unavailable. The API publishes process-local SSE events after durable work; SSE is not a database change feed.
+
+## Incident lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> open
+  open --> investigating
+  investigating --> hypothesis_formed
+  hypothesis_formed --> monitoring
+  hypothesis_formed --> remediation_proposed
+  remediation_proposed --> remediation_approved
+  remediation_approved --> remediation_executed
+  monitoring --> resolved
+  hypothesis_formed --> resolved
+  remediation_proposed --> resolved
+  remediation_executed --> resolved
+  investigating --> escalated
+  resolved --> closed
+  closed --> reopened
+```
+
+The database state machine is the authority for legal transitions, and every transition records actor type/id. The worker also records an investigation lock so abandoned `investigating` incidents can be reclaimed after a worker failure.
+
+## Request and investigation flow
+
+```mermaid
+sequenceDiagram
+  participant W as Alert sender
+  participant A as API
+  participant P as Postgres
+  participant R as Worker
+  participant G as LangGraph
+  participant E as Evidence sources
+  participant U as Dashboard
+  W->>A: POST alert
+  A->>P: create or find incident
+  A-->>W: 201 / existing id
+  R->>P: claim investigation lock
+  R->>G: invoke incident graph
+  G->>E: allowlisted read-only calls
+  G->>P: persist steps, messages, citations, transitions
+  G-->>U: SSE events
+  U->>A: detail/replay requests
+  A->>P: persisted audit view
+```
+
+## Why the boundaries matter
+
+The API is deliberately thin: it accepts and serves requests but does not investigate an alert or make infrastructure changes in the request. That separation makes retries safer and keeps a slow model/tool call from holding a browser request open. The worker is responsible for claiming and progressing durable work.
+
+Similarly, the graph owns the order in which agents run. An agent cannot call a neighboring agent directly, which makes graph routing, retry bounds, persistence, and audit behavior visible in one place.
+
+## A concrete example
+
+For a `payment-service` crash-loop alert, the worker can: classify the alert; ask Correlation to inspect pods, events, metrics, and relevant changes; run multiple RCA passes with the gathered evidence and service-filtered runbooks; have Observer reject unsupported claims; and finally create a remediation proposal if a validated hypothesis maps to the action catalog. Each visible dashboard step comes from rows persisted during those stages.
+
+## Component boundaries
+
+- **API:** authentication, ingestion, read/query endpoints, approvals, safety control endpoints, SSE.
+- **Worker:** claims work, executes/reconciles the graph and approved action lifecycle; protects against concurrent workers with DB locking.
+- **Graph:** owns routing. Agents do not invoke each other directly.
+- **Agents:** pure or narrowly-scoped reasoning cores; graph nodes isolate persistence/SSE effects.
+- **MCP layer:** capability boundary for external systems. Agents use a gateway and no direct infrastructure credentials.
+- **Frontend:** renders persisted API data and event streams; role controls improve usability only and are rechecked server-side.
+
+## Deployment topology
+
+The checked-in infrastructure deploys the simulated Meridian services to `kind`, configures kube-prometheus-stack, and provides separate read-only and writer Kubernetes RBAC manifests. The read role permits read/list/watch for pods, logs, events, services/endpoints, deployments and replicasets. Writer permissions are separately scoped to deleting pods and patching/updating deployment scale. See [Operations](./operations.mdx).
+
+## Repository orientation
+
+| Directory | Read it when you need to… |
+| --- | --- |
+| `backend/api` | Understand the HTTP boundary, auth, SSE, and route contracts. |
+| `backend/worker` | Understand claim/recovery and asynchronous investigation execution. |
+| `backend/orchestrator` | Follow graph nodes and supervisor routing. |
+| `backend/agents` | Inspect individual reasoning and safety responsibilities. |
+| `backend/mcp_servers` | See external-system clients, contracts, and tool boundaries. |
+| `backend/db` | Understand models, lifecycle rules, and migrations. |
+| `frontend` | Understand dashboard pages and the typed browser API client. |
+| `infra` | Operate the local kind/Meridian/Prometheus environment. |
+
+Next: [AI system and LangGraph](./ai-system.mdx) · [Security and safety](./security-and-safety.mdx).

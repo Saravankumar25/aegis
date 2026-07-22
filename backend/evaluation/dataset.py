@@ -114,6 +114,17 @@ class GroundingCase:
     contexts: tuple[str, ...]
     ground_truth: str
     why: str = ""
+    # True when the correct answer is a refusal ("the evidence does not establish a cause").
+    #
+    # This exists because RAGAS's ResponseRelevancy scores noncommittal answers 0 *by
+    # design* — it works by regenerating a question from the answer, and a refusal yields
+    # no answerable question. On these cases a 0 therefore measures the metric's definition,
+    # not the system's quality: the two refusal cases here are the ones Aegis most needs to
+    # get right, and both scored 0.00 relevancy while scoring 1.00 faithfulness.
+    #
+    # Averaging them in produced an aggregate relevancy of 0.33 that read as a serious
+    # quality problem and was in fact the system correctly declining to fabricate a cause.
+    expects_refusal: bool = False
 
 
 GOLDEN_GROUNDING_CASES: tuple[GroundingCase, ...] = (
@@ -141,6 +152,7 @@ GOLDEN_GROUNDING_CASES: tuple[GroundingCase, ...] = (
             "The evidence does not identify a cause. Pods are restarting, but the deploy "
             "source was unavailable, so a code change cannot be blamed."
         ),
+        expects_refusal=True,
         why=(
             "The exact failure observed live: the model blamed 'a recent deployment' while "
             "the deploy source was down and no deploy evidence existed. 'Unknown' is correct."
@@ -157,6 +169,7 @@ GOLDEN_GROUNDING_CASES: tuple[GroundingCase, ...] = (
             "No. The pod is ready with zero restarts and the error rate is zero; this "
             "evidence shows a healthy service."
         ),
+        expects_refusal=True,
         why=(
             "Mentioning restarts is not evidence OF restarts. A naive keyword check read "
             "'restarts=0' as a resource-exhaustion signal — this case guards that."

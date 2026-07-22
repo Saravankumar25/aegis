@@ -82,13 +82,20 @@ READ_ONLY_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         server="k8s",
         tool="list_events",
-        description="Recent cluster events (scheduling, evictions, probe failures, OOM kills).",
+        description=(
+            "Cluster events from the last few minutes (scheduling, evictions, probe "
+            "failures, OOM kills). Older events are excluded — they usually describe the "
+            "last cluster restart, not this incident."
+        ),
         when_to_use=(
             "When pods are unhealthy but their logs are unrevealing — events explain what the "
             "cluster did *to* the pod rather than what the app did."
         ),
         evidence_type=EvidenceType.log,
-        args={"namespace": "string, optional"},
+        args={
+            "namespace": "string, optional",
+            "within_minutes": "integer, optional — look further back than the default window",
+        },
     ),
     ToolSpec(
         server="k8s",

@@ -85,4 +85,9 @@ markers = [
     # Loads a real ONNX model from the local cache. Slower than the rest of the unit suite
     # and needs a one-time model download, so it is separable: `-m "not embedding"`.
     "embedding: exercises the real local embedding/reranker model",
+    # Calls a real judge model (RAGAS). Costs judge-model tokens and needs GEMINI_API_KEYS,
+    # so it is opt-in (`-m ragas_live`) rather than part of the default per-commit run —
+    # the deterministic retrieval gate in evaluation/retrieval_metrics.py is what runs on
+    # every commit; this is the pre-release check.
+    "ragas_live: calls a real LLM judge; on-demand only, never per-commit",
 ]

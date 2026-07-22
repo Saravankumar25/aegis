@@ -12,6 +12,7 @@ const NAV = [
   { href: "/dashboard", label: "Incidents" },
   { href: "/approvals", label: "Approvals" },
   { href: "/settings/kill-switch", label: "Safety" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -30,7 +31,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
           <nav aria-label="Primary" className="flex gap-3 text-[13px] sm:gap-5">
             {NAV.map((item) => {
-              const active = pathname.startsWith(item.href);
+              // Prefix matching alone would light up "Settings" while on
+              // "/settings/kill-switch", marking two tabs current at once. A nested route
+              // belongs to the deepest item that prefixes it, so an item is active only when
+              // no longer NAV entry also matches.
+              const matches = pathname === item.href || pathname.startsWith(`${item.href}/`);
+              const deeperMatch = NAV.some(
+                (other) =>
+                  other.href !== item.href &&
+                  other.href.startsWith(`${item.href}/`) &&
+                  (pathname === other.href || pathname.startsWith(`${other.href}/`)),
+              );
+              const active = matches && !deeperMatch;
               return (
                 <Link
                   key={item.href}

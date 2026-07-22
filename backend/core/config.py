@@ -231,6 +231,13 @@ class Settings(BaseSettings):
     k8s_writer_token_file: str = Field(default="../infra/.k8s-mcp-writer-token")
     k8s_ca_cert_file: str = Field(default="../infra/.k8s-mcp-ca.crt")
     k8s_namespace: str = Field(default="meridian")
+    # How far back `list_events` looks. Kubernetes retains events for about an hour, so an
+    # unfiltered list mixes current symptoms with whatever happened at the last cluster
+    # restart — observed live, where 33-minute-old startup probe failures were read by RCA as
+    # present instability. 15 minutes comfortably covers the window between a fault starting
+    # and an alert firing, without reaching back into an unrelated restart. Set to 0 to
+    # disable filtering for a deliberately historical investigation.
+    k8s_event_window_minutes: int = Field(default=15, ge=0)
 
     # --- MCP tool-call resilience (ESD §12: 3 attempts, exponential backoff, then degrade) ---
     mcp_retry_attempts: int = Field(default=3)

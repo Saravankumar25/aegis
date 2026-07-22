@@ -1,0 +1,43 @@
+# Contributing and extension points
+
+Contributions are safest when they preserve Aegis’s core contract: a human can see what happened, why it happened, and what the system is allowed to do next.
+
+## Development conventions encoded by the project
+
+- Use async interfaces for database, MCP, and LLM interactions.
+- Preserve Postgres as the source of truth and Redis as cache only.
+- Keep agent routing in the LangGraph supervisor; agents should not call each other directly.
+- Treat new evidence as untrusted: redact, delimit for prompts, and add contract/fault tests for a new external source.
+- Do not add a remediation action without a predeclared tier, compensating action, and safety tests.
+- Update schema/API architecture records when those contracts change; run test/lint checks before merging.
+
+## Safe extension locations
+
+| Need | Primary implementation area |
+| --- | --- |
+| Prompt version or agent instruction | `backend/agents/prompts/library.py` |
+| New read-only evidence tool | MCP client/server, `agents/correlation/tools.py` allowlist, contract tests, fault injection. |
+| New action | `agents/resolution/actions.py`, resolution engine safety coverage, RBAC if relevant. |
+| New API route | `backend/api/routes`, schemas, dependencies/security tests. |
+| New persistent data | SQLAlchemy model and Alembic migration. |
+| New dashboard view | `frontend/app` plus typed API client contract. |
+| New evaluation case | `eval/synthetic_incidents`, runbooks, and appropriate backend tests. |
+
+## Before changing behavior
+
+The project’s operating guide requires extra architectural scrutiny for a new external dependency, autonomous action, untrusted data flow, or authentication surface. In practice, inspect reliability, safety, security, scalability, and operational maturity before implementing, then add deterministic and integration/contract coverage matching the change.
+
+## A practical contribution workflow
+
+1. Read the subsystem page in this portal and the matching implementation/tests.
+2. Identify the durable contract: schema, API response, state transition, tool shape, or safety gate.
+3. Make the smallest coherent change and add the matching test layer.
+4. Run `pytest` and `ruff check .` from `backend`.
+5. Update the implementation-aligned documentation when behavior, configuration, or operator workflow changes.
+
+> [!TIP]
+> For a new external evidence source, do not stop at a client. Add a typed result, explicit allowlist entry, redaction/prompt treatment, contract fixture, and degradation test before an agent can use it.
+
+## Documentation map
+
+Use [Architecture](./architecture.mdx) for boundaries, [AI system](./ai-system.mdx) for agent behavior, [Security and safety](./security-and-safety.mdx) for non-negotiable action constraints, and [Configuration](./configuration.mdx) for runtime switches.

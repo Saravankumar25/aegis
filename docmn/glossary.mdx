@@ -1,0 +1,27 @@
+# Glossary
+
+Use this page as a quick reference while reading the operator and architecture guides.
+
+| Term | Meaning in Aegis |
+| --- | --- |
+| **Alert** | An incoming signal from `prometheus`, `github`, or `pagerduty` that can create an incident. The source plus external alert id makes ingestion idempotent. |
+| **Incident** | The durable correlation record for one investigation, including lifecycle transitions, steps, messages, citations, and actions. |
+| **Agent** | A bounded responsibility in the investigation pipeline, such as Triage, Correlation, RCA, Observer, Resolution, Communication, or Memory. |
+| **Correlation** | The stage that selects and gathers scoped evidence from the approved tool catalog, then synthesizes what it found and what it could not obtain. |
+| **RCA** | Root-cause analysis. Aegis makes several RCA passes and calculates agreement before presenting a hypothesis. |
+| **Observer** | The validation stage. It mechanically checks evidence support and can use a semantic critique to veto a hypothesis. It cannot rescue an unsupported result. |
+| **Citation** | A persisted link from an agent step to a redacted evidence reference/snippet. Citations make a claim inspectable. |
+| **Evidence gap** | A recorded, sanitized explanation that an evidence source/tool could not supply a result. It is not proof that no problem exists. |
+| **MCP** | Model Context Protocol. In Aegis, MCP servers provide narrowly scoped Kubernetes, Prometheus, GitHub, and Slack capabilities. |
+| **Runbook** | Operational reference content stored as chunked text, lexical index, and vector embedding for retrieval. |
+| **Reranking** | Optional cross-encoder ordering of a wider hybrid-search candidate set before returning final runbook chunks. |
+| **Memory summary** | A lesson from a resolved incident. It is only available to future RCA after a human approves it. |
+| **Proposal** | A persisted remediation recommendation with tier, target, reason, expiry, blast radius, and compensating action. |
+| **Tier 1 / 2 / 3** | Remediation classes: constrained automatic action / approval-required action / human-only action. |
+| **Shadow mode** | Records what an eligible Tier-1 action would do without touching infrastructure. It is enabled by default. |
+| **Resource lease** | A database-enforced exclusive claim on a remediation target to stop concurrent changes to the same resource. |
+| **Circuit breaker** | The durable global control that stops too many Tier-1 actions in its configured time window. |
+| **Kill switch** | The durable control that halts all autonomous action immediately; it does not erase records or stop investigation reads. |
+| **Replay** | A chronological reconstruction of a resolved incident from persisted transitions, steps, and messages; it does not query live infrastructure. |
+
+Related: [Use Aegis](./using-aegis.mdx) · [Architecture](./architecture.mdx) · [Security and safety](./security-and-safety.mdx).

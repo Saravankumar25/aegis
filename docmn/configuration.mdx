@@ -1,0 +1,78 @@
+# Configuration reference
+
+All settings are loaded by `backend/core/config.py` from the environment (root `.env` in normal local setup). Defaults below are implementation defaults; secrets are intentionally not shown.
+
+> [!WARNING]
+> Safety thresholds—including action rate limits, breaker values, shadow mode, and blast-radius limit—change what autonomous execution is permitted to do. Treat changes to them as safety-relevant operational changes.
+
+## Core and security
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` | local asyncpg URL | Canonical Postgres connection. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Cache/rate limiter connection. |
+| `REDIS_MAX_CONNECTIONS` | `20` | Redis pool limit. |
+| `REDIS_TIMEOUT_SECONDS` | `2.0` | Redis socket/connect timeout. |
+| `EVIDENCE_CACHE_TTL_SECONDS` | `30` | External evidence cache TTL. |
+| `API_RATE_LIMIT_PER_WINDOW` / `API_RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | Normal fixed-window API limiter. |
+| `INGEST_RATE_LIMIT_PER_WINDOW` | `600` | Ingestion limiter count. |
+| `JWT_SECRET` | development placeholder | Required strong signing secret outside local development. |
+| `JWT_ACCESS_TTL_SECONDS` / `JWT_REFRESH_TTL_SECONDS` | `900` / `604800` | Cookie/session lifetimes. |
+| `FIREBASE_PROJECT_ID` | empty | Firebase project identity. |
+| `FIREBASE_SERVICE_ACCOUNT_FILE` | `../.secrets/firebase-service-account.json` | Backend Firebase verifier credentials. |
+| `AEGIS_ADMIN_EMAILS` / `AEGIS_APPROVER_EMAILS` | empty | Comma-separated role allowlists. |
+| `CORS_ORIGINS` | `http://localhost:3000` | Allowed browser origins. |
+| `INGEST_WEBHOOK_TOKEN` | unset | Optional bearer/shared webhook guard. |
+| `ENVIRONMENT` | `local` | Runtime environment label. |
+
+## Model and RAG settings
+
+| Variable | Default |
+| --- | --- |
+| `LLM_PROVIDER` | `openrouter` |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `OPENROUTER_API_KEYS` | empty |
+| `GEMINI_BASE_URL` | Google v1beta endpoint |
+| `GEMINI_API_KEYS` | empty |
+| `GEMINI_MODEL_RCA`, `GEMINI_MODEL_DEFAULT` | `gemini-3.1-flash-lite` |
+| `LLM_MODEL_RCA` | `nvidia/nemotron-3-super-120b-a12b:free` |
+| `LLM_MODEL_DEFAULT` | `nvidia/nemotron-nano-9b-v2:free` |
+| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT_SECONDS` | `0.2` / `2500` / `90` |
+| `LLM_STRUCTURED_REPAIR_ATTEMPTS` | `2` |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `BAAI/bge-small-en-v1.5` / `384` |
+| `EMBEDDING_CACHE_DIR` / `EMBEDDING_BATCH_SIZE` | `../.model-cache` / `32` |
+| `CHUNK_MAX_CHARS` / `CHUNK_OVERLAP_CHARS` / `CHUNK_MIN_CHARS` | `1200` / `150` / `80` |
+| `RAG_TOP_K` / `RAG_CANDIDATE_K` / `RAG_RRF_K` | `5` / `30` / `60` |
+| `RAG_RERANK_ENABLED` | `true` |
+| `RAG_RERANKER_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` |
+| `RAG_MIN_SCORE` | `-11.0` (calibrated cross-encoder logit floor; only when reranking runs) |
+
+## Runtime, integrations, safety, telemetry
+
+| Variable | Default / purpose |
+| --- | --- |
+| `CORRELATION_MAX_ROUNDS`, `CORRELATION_MAX_CALLS_PER_ROUND`, `CORRELATION_MAX_INVOCATIONS` | `3`, `4`, `2`: bounded Correlation loop controls. |
+| `SUPERVISOR_MAX_REVISIONS`, `GRAPH_RECURSION_LIMIT` | `1`, `25`: bounded graph routing/revision controls. |
+| `DEDUP_WINDOW_SECONDS`, `RCA_ENSEMBLE_PASSES`, `INCIDENT_TOKEN_BUDGET` | `300`, `3`, `200000`. |
+| `EXPLANATIONS_ENABLED`, `DEPLOY_LOOKBACK_HOURS`, `RCA_AGREEMENT_THRESHOLD` | `true`, `2.0`, `0.6`. |
+| `PROMETHEUS_URL`, `GITHUB_REPO`, `GITHUB_API_URL`, `GITHUB_TOKEN` | Evidence-source integration. |
+| `MCP_RETRY_ATTEMPTS`, `MCP_RETRY_BASE_DELAY_SECONDS`, `MCP_HTTP_TIMEOUT_SECONDS` | `3`, `0.2`, `10`. |
+| `TIER1_RATE_LIMIT_PER_HOUR`, `BREAKER_WINDOW_MINUTES`, `BREAKER_MAX_TIER1_IN_WINDOW`, `PROPOSAL_EXPIRY_MINUTES` | `3`, `10`, `10`, `30`: safety thresholds/timing. |
+| `RESOLUTION_SHADOW_MODE` | `true`; shadows Tier-1 execution by default. |
+| `MAX_BLAST_RADIUS_DEPENDENTS` | Tier-1 dependency safety bound. |
+| `SLACK_WEBHOOK_URL` | Optional update mirroring. |
+| `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` | Optional tracing; project defaults to `aegis`. |
+
+Frontend configuration uses `NEXT_PUBLIC_API_BASE` (default `http://localhost:8000/api/v1`) and the standard public Firebase `NEXT_PUBLIC_FIREBASE_*` values used by `frontend/lib/firebase.ts`.
+
+## Configuration by task
+
+| Task | Settings to review |
+| --- | --- |
+| Point the API at local dependencies | `DATABASE_URL`, `REDIS_URL`, CORS settings. |
+| Enable sign-in | Firebase project/service account, frontend Firebase values, allowlists. |
+| Choose model capacity | Provider/key/model/fallback settings. |
+| Tune retrieval | Embedding/chunking/RAG settings; recalibrate the score floor after corpus or reranker changes. |
+| Connect evidence systems | Prometheus, GitHub, and Kubernetes API/credential settings. |
+| Control automation | Tier-1 limits, breaker settings, proposal expiry, shadow mode, blast radius. |
+| Enable tracing | LangSmith key/project/endpoint. |

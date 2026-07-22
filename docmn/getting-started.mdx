@@ -1,0 +1,107 @@
+# Getting started
+
+This guide takes you from a checkout to a running local dashboard and worker. It assumes the repository is already available on your machine.
+
+> [!NOTE]
+> Aegis is intentionally local-first. The checked-in infrastructure runs the **Meridian** demo services on `kind`; it does not provide a production deployment of Aegis itself.
+
+## Prerequisites
+
+- Python 3.12 for the backend virtual environment. The repository explicitly warns that newer 3.14 environments can install but fail at import time.
+- Docker/Compose for PostgreSQL with pgvector and Redis.
+- Node.js/npm for the Next.js frontend.
+- A Firebase project with Google sign-in, plus a Firebase service-account JSON available at the configured local path.
+- At least one working OpenRouter or Gemini API key. Aegis does not synthesize offline results.
+- Optional but needed for live evidence: a `kind` cluster, Prometheus, Kubernetes MCP credentials, and a GitHub token where the repository requires one.
+
+## Configure secrets locally
+
+Copy the supplied root environment template to `.env`; do not commit the result. The template contains the database, Redis, session, provider, MCP, Firebase, and LangSmith settings. It points to a gitignored Firebase service-account file by default.
+
+The frontend separately requires `frontend/.env.local` based on its template, including the public Firebase web configuration and optionally `NEXT_PUBLIC_API_BASE`. Public Firebase web configuration identifies a Firebase project; backend verification and Aegis cookies remain the authorization boundary.
+
+<details>
+<summary>Minimum configuration checklist</summary>
+
+1. Set a non-placeholder `JWT_SECRET`.
+2. Configure one model provider: OpenRouter (`OPENROUTER_API_KEYS`) or Gemini (`GEMINI_API_KEYS`), and select it with `LLM_PROVIDER`.
+3. Set Firebase project/service-account settings and frontend public Firebase settings for sign-in.
+4. Start Postgres and Redis before the API.
+5. For live cluster evidence, configure `K8S_API_URL`, token, CA file, and the Meridian namespace.
+
+</details>
+
+## Start dependencies and backend
+
+```powershell
+docker compose up -d
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn api.main:app --reload
+```
+
+`docker-compose.yml` exposes Postgres on host port `5433` and Redis on the configured URL. The backend’s default API base is `http://localhost:8000`, with versioned routes below `/api/v1`.
+
+Run the worker in another activated backend shell:
+
+```powershell
+python -m worker.main
+```
+
+The API persists an alert; the worker claims and investigates it. API requests do not perform infrastructure actions inline.
+
+> [!TIP]
+> If Python imports fail after a successful install, verify the environment really uses Python 3.12. This repository documents Python 3.14 as an incompatible runtime for this dependency set.
+
+## Start the frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. Sign-in opens a Google/Firebase popup, exchanges the short-lived Firebase ID token at the backend, then immediately signs Firebase out. Browser API calls use `credentials: include`; JavaScript does not retain the Aegis session token.
+
+## Validate a checkout
+
+```powershell
+cd backend
+pytest
+ruff check .
+```
+
+The suite is organized into unit, integration, contract, fault-injection, and evaluation tests. Some integration tests require the dedicated database/services and are skipped when unavailable.
+
+## First operational flow
+
+1. Authenticate in the dashboard.
+2. Send an alert to `POST /api/v1/incidents` (see [API reference](./api-reference.mdx)). The source/external ID pair is idempotent.
+3. The worker locks and runs the investigation. Watch `/dashboard` or the incident’s SSE stream.
+4. Read the Observer verdict and citations before treating an RCA as validated.
+5. For a proposed Tier-2 action, an on-call engineer or admin decides it in Approvals. Tier-3 remains a human-run external operation.
+6. Resolve the incident through the UI/API; this creates a pending memory summary for human review.
+
+See [Operations](./operations.mdx) for local cluster setup and failure diagnosis.
+
+## Verify the API before signing in
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Expected healthy shape:
+
+```json
+{
+  "status": "ok",
+  "checks": { "postgres": "ok", "redis": "ok" }
+}
+```
+
+If Redis is unavailable, Aegis reports `degraded` but remains able to serve canonical data from Postgres. If Postgres is unavailable, the endpoint returns 503 because the API cannot safely serve source-of-truth data.
+
+Next: [Use Aegis during an incident](./using-aegis.mdx) or learn [how the architecture fits together](./architecture.mdx).
