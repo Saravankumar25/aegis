@@ -31,6 +31,11 @@ def test_incident_state_values() -> None:
         "open",
         "investigating",
         "hypothesis_formed",
+        # Terminal for automation, not for the incident (migration 0009). Added because an
+        # escalated incident previously sat in `hypothesis_formed`, indistinguishable from
+        # one still being worked — so the dashboard could not show which incidents were
+        # waiting on a human.
+        "escalated",
         "remediation_proposed",
         "remediation_approved",
         "remediation_executed",

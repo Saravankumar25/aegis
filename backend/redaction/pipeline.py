@@ -32,6 +32,46 @@ _SECRET_ASSIGN = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 
+# --- Bare credential literals ---------------------------------------------------------------
+#
+# The two patterns above only fire when a secret is *introduced* by a key name or by "Bearer".
+# A credential that simply appears in free text — which is the normal shape in a stack trace,
+# a pod log line, a commit message, or a k8s event — matched nothing and travelled onward
+# verbatim. That is not a theoretical leak: redacted evidence is what gets embedded in the RCA
+# prompt and shipped to a third-party inference API and to LangSmith, so an unredacted key in
+# a log line is a key handed to two external vendors and then persisted to the dashboard.
+#
+# Every pattern here is anchored on a vendor-assigned prefix and a length, so precision is
+# high and ordinary operational text (trace ids, image digests, git SHAs) does not match.
+# ``guardrails.policy`` imports this same table for its egress block list, so ingress and
+# egress cannot drift apart — they were already inconsistent before this was shared.
+SECRET_LITERALS: list[tuple[re.Pattern[str], str]] = [
+    # The END armour is optional and the fallback swallows the remainder of the text. A key
+    # that is truncated — by a log rotation, a line limit, or a partial model response — is
+    # still a disclosed key, and requiring the closing armour would have let exactly that
+    # case through both here and (via the shared table) the egress block.
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+            r"(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+            re.S,
+        ),
+        "private_key",
+    ),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "google_api_key"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "github_token"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "api_key"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "slack_token"),
+    (re.compile(r"\blsv2_(?:pt|sk)_[A-Za-z0-9]{16,}"), "langsmith_key"),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]{20,}"), "slack_webhook"),
+    # A JWT is the shape of both an Aegis session cookie and a Kubernetes ServiceAccount
+    # token — the latter being exactly the credential the k8s MCP server holds.
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+        "jwt",
+    ),
+]
+
 _REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (_EMAIL, "[REDACTED_EMAIL]"),
     (_IPV4, "[REDACTED_IP]"),
@@ -87,6 +127,13 @@ def redact(text: str) -> RedactionResult:
     out, n = _BEARER.subn("[REDACTED_TOKEN]", text)
     count += n
     out = _SECRET_ASSIGN.sub(secret_repl, out)
+    # Bare credential literals come after the assignment rule so that `api_key=AIza...` keeps
+    # its existing `[REDACTED_SECRET]` form, and only genuinely unintroduced secrets fall
+    # through to the per-kind marker. The marker names the kind because an operator reading
+    # redacted evidence still needs to know *what* leaked in order to rotate it.
+    for pattern, kind in SECRET_LITERALS:
+        out, n = pattern.subn(f"[REDACTED_{kind.upper()}]", out)
+        count += n
     for pattern, replacement in _REPLACEMENTS:
         out, n = pattern.subn(replacement, out)
         count += n

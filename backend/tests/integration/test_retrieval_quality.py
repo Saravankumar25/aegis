@@ -21,15 +21,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.enums import RunbookSource
 from evaluation import GOLDEN_RETRIEVAL_CASES, evaluate_retrieval
 from evaluation.retrieval_metrics import score_case
-from rag.store import upsert_runbook
+from rag.store import search_runbooks, upsert_runbook
 
 pytestmark = pytest.mark.embedding
 
 # Committed quality floor. Changing any of these downward is a deliberate act that shows up
 # in review as exactly what it is: accepting worse retrieval.
-MIN_HIT_RATE = 0.80
-MIN_MRR = 0.70
-MIN_NDCG = 0.70
+#
+# Raised after the corpus was restructured into sectioned runbooks and the relevance floor was
+# calibrated (`python -m evaluation.calibration`). Measured against the shipped corpus:
+# hit_rate 1.00, mrr 1.00, ndcg@k 0.98, forbidden 0.00 — up from 0.86 / 0.65 / 0.70 / 0.14.
+# The floors sit just below the measured values rather than at them: retrieval has a genuine
+# tie-breaking element, and a gate pinned exactly to the observed number fails on noise and
+# trains people to lower it.
+MIN_HIT_RATE = 1.00  # every answerable golden case must find its runbook
+MIN_MRR = 0.90
+MIN_NDCG = 0.90
 MAX_FORBIDDEN_RATE = 0.0  # a known distractor surfacing is never acceptable
 
 _CORPUS = {
@@ -104,8 +111,6 @@ async def test_semantic_cases_pass_without_lexical_overlap(corpus):
 
 
 async def test_metadata_filter_returns_only_the_named_service(corpus):
-    from rag.store import search_runbooks
-
     hits = await search_runbooks(corpus, "pods restarting", k=5, service="catalog-service")
     assert hits
     assert all("catalog-service" in h.service_tags for h in hits)
@@ -144,3 +149,46 @@ def test_unanswerable_case_rewards_returning_nothing():
     confident = score_case(case_id="t", retrieved_titles=["OOMKilled"], expected_titles=())
     assert empty.passed is True
     assert confident.passed is False
+
+
+# --- the calibrated relevance floor ------------------------------------------------------
+
+
+async def test_out_of_domain_query_retrieves_nothing(corpus):
+    """The defect this floor exists to fix.
+
+    With `rag_min_score` at 0 the filter was disabled, so an out-of-domain question returned
+    `k` confident operational runbooks and fed them into the RCA prompt as context. The model
+    then had four authoritative-looking passages about incidents that had nothing to do with
+    the question — distractors supplied by the retrieval layer itself.
+    """
+    session = corpus
+    for query in (
+        "how do I file an expense report for the offsite",
+        "what is the capital of France",
+        "what is our parental leave policy",
+    ):
+        hits = await search_runbooks(session, query)
+        assert hits == [], f"{query!r} returned {[h.title for h in hits]}"
+
+
+async def test_paraphrased_query_survives_the_floor(corpus):
+    """The floor must not be tuned so tight that it removes the retrieval it exists to serve.
+
+    A relevant passage phrased in an operator's own words scores far below one sharing the
+    document's vocabulary (~-4 against ~+2.6). A naive "score > 0" floor would discard exactly
+    the semantic retrieval the embedder was chosen for.
+    """
+    hits = await search_runbooks(corpus, "the container keeps dying because it ran out of memory")
+    assert hits, "a paraphrased but genuinely relevant query must still retrieve"
+    assert "OOMKilled" in hits[0].title
+
+
+async def test_floor_is_not_applied_to_unreranked_scores(corpus):
+    """RRF scores are rank artefacts in the ~0.02 range, not relevance.
+
+    Thresholding them against a logit floor would drop every result. Retrieval with reranking
+    off must therefore still return hits — the floor is gated on reranking having run.
+    """
+    hits = await search_runbooks(corpus, "pods restarting repeatedly", rerank=False)
+    assert hits, "disabling the reranker must not silently disable retrieval"

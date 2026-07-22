@@ -747,7 +747,14 @@ def build_graph(services: InvestigationServices):
         }
 
     async def escalate(state: InvestigationState) -> InvestigationState:
-        """Hand to a human when the evidence cannot support a conclusion."""
+        """Hand to a human when the evidence cannot support a conclusion.
+
+        Runs `finalize` first so the incident is closed out consistently — citations
+        stamped, communication update posted, audit written — and *then* records the
+        escalation as its own state. Doing it in that order matters: `finalize` only
+        transitions out of `investigating`, so transitioning to `escalated` first would
+        leave finalize's guard unsatisfied and skip the close-out entirely.
+        """
         await _persist(
             state["incident_id"],
             "orchestrator",
@@ -756,7 +763,32 @@ def build_graph(services: InvestigationServices):
             structured={"escalated": True},
             event="escalated",
         )
-        return await finalize(state)
+        finalized = await finalize(state)
+
+        async with services.sessionmaker() as session:
+            incidents = IncidentRepository(session)
+            incident = await incidents.get(uuid.UUID(state["incident_id"]))
+            # Guarded on the states escalation is legal from: a Resolution proposal may have
+            # already advanced the incident past hypothesis_formed, and overwriting that
+            # would erase a pending human approval.
+            if incident is not None and incident.state in (
+                IncidentState.investigating,
+                IncidentState.hypothesis_formed,
+            ):
+                await incidents.record_transition(
+                    incident,
+                    IncidentState.escalated,
+                    actor_type=ActorType.agent,
+                    actor_id="orchestrator",
+                )
+                await publish_event(
+                    session,
+                    incident.id,
+                    "state_changed",
+                    {"state": IncidentState.escalated.value},
+                )
+                await session.commit()
+        return {**finalized, "final_state": IncidentState.escalated.value}
 
     def route_from_supervisor(state: InvestigationState) -> str:
         """Read the supervisor's already-validated choice. No decision is made here."""

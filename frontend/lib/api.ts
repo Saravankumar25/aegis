@@ -57,18 +57,36 @@ export interface Citation {
   validated_by_observer: boolean;
 }
 
+// Mirrors backend AgentExplanationOut. These names are a contract: the backend lifts this
+// out of `structured_output` into a typed field precisely so the UI never guesses at shape.
+export interface AgentExplanation {
+  headline: string;
+  what_it_received: string;
+  evidence_collected: string[];
+  tools_used: string[];
+  documents_retrieved: string[];
+  reasoning: string;
+  alternatives_considered: string[];
+  confidence: number | null;
+  uncertainty: string;
+  recommended_next: string[];
+}
+
 export interface AgentStep {
   id: string;
   agent_name: string;
   ensemble_pass_index: number | null;
+  input_summary: string | null;
   output_summary: string | null;
   structured_output: Record<string, unknown> | null;
   confidence: number | null;
   model_used: string | null;
   tokens_used: number | null;
   cost_usd: number | null;
+  latency_ms: number | null;
   created_at: string;
   citations: Citation[];
+  explanation: AgentExplanation | null;
 }
 
 export interface AgentMessage {
@@ -113,6 +131,39 @@ export interface User {
   role: string;
   display_name: string | null;
   photo_url: string | null;
+}
+
+// Role gating is a *readability* aid only — the server re-checks every privileged call
+// (CLAUDE.md §12). These helpers exist so no component hardcodes a role string inline and
+// a role added backend-side is one edit here, not a grep across pages.
+export const ROLE_LABEL: Record<string, string> = {
+  viewer: "viewer",
+  on_call_engineer: "on-call engineer",
+  admin: "admin",
+};
+
+/** Roles permitted to approve remediation, engage the kill switch, resolve an incident. */
+export function canAct(user: User | null): boolean {
+  return user?.role === "on_call_engineer" || user?.role === "admin";
+}
+
+/** Disengaging the kill switch and clearing the breaker are admin-only (ESD §7/§8). */
+export function isAdmin(user: User | null): boolean {
+  return user?.role === "admin";
+}
+
+/** Human-readable reason a control is disabled, or null when it is available. */
+export function deniedReason(user: User | null, need: "act" | "admin"): string | null {
+  if (!user) return "Sign in to use this control.";
+  if (need === "admin" && !isAdmin(user)) {
+    return `Requires the admin role — you are signed in as ${ROLE_LABEL[user.role] ?? user.role}.`;
+  }
+  if (need === "act" && !canAct(user)) {
+    return `Requires the on-call engineer or admin role — you are signed in as ${
+      ROLE_LABEL[user.role] ?? user.role
+    }.`;
+  }
+  return null;
 }
 
 export function eventSource(path: string): EventSource {

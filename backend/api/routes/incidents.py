@@ -42,6 +42,10 @@ _ACTIVE_STATES = (
     IncidentState.open,
     IncidentState.investigating,
     IncidentState.hypothesis_formed,
+    # An escalated incident is still open — it is waiting on a human. A second alert for the
+    # same service must merge into it rather than open a duplicate, or escalating would turn
+    # one incident into a stream of new ones for as long as the fault persists.
+    IncidentState.escalated,
     IncidentState.reopened,
 )
 

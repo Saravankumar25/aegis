@@ -49,7 +49,24 @@ class EvidenceStore(BaseModel):
         return item
 
     def note_gap(self, source: str, reason: str) -> None:
-        self.gaps.append(f"{source}: {reason}")
+        """Record an unavailable evidence source, sanitising the reason first.
+
+        Sanitisation lives *here*, not at the call sites, and that placement is the point.
+        A gap reason is the error string an MCP tool returned — attacker-reachable exactly
+        as a log line is — and it renders into four prompts (`correlation.plan`,
+        `correlation.synthesis`, `rca.hypothesis`, `observer.critique`). It originally
+        bypassed redaction and `<evidence>` delimiting entirely, so a card number in an
+        upstream 500 reached the RCA prompt in the clear, and the text landed *outside* any
+        evidence tag — where the rules governing tagged content do not reach, making it read
+        as system-authored narration rather than as untrusted data.
+
+        Sanitising at the seven known call sites fixed the instances but not the class: the
+        next gap producer would reintroduce it. Doing it in the one method every producer
+        must call makes bypassing it require deleting this line.
+        """
+        from agents.correlation.gaps import sanitize_gap_reason
+
+        self.gaps.append(f"{source}: {sanitize_gap_reason(reason)}")
 
     def get(self, evidence_id: str) -> EvidenceItem | None:
         return next((i for i in self.items if i.id == evidence_id), None)

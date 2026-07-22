@@ -34,7 +34,21 @@ const ACTIVE_STATES = new Set([
   "reopened",
 ]);
 
+// `escalated` is the one state that carries information greyscale cannot: it means the
+// automation has stopped and a human is now the only thing that will move this incident.
+// Rendering it as just another quiet chip is what made it invisible before it was a state
+// at all, so it gets the danger token — the same justification the severity ramp uses.
+const NEEDS_HUMAN = "escalated";
+
 export function StateBadge({ state }: { state: string }) {
+  if (state === NEEDS_HUMAN) {
+    return (
+      <span className={`${base} border-danger/40 text-danger`}>
+        <span className="h-1.5 w-1.5 rounded-full bg-current" />
+        needs human
+      </span>
+    );
+  }
   const active = ACTIVE_STATES.has(state);
   return (
     <span

@@ -7,6 +7,8 @@ Run locally:  uvicorn api.main:app --port 8000
 
 from __future__ import annotations
 
+import re
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -14,6 +16,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.routing import Match
 
 from api.deps import get_current_user
 from api.errors import error_response, install_error_handlers
@@ -25,6 +28,75 @@ from core.logging import configure_logging, get_logger
 from core.redis import check_rate_limit, close_redis, redis_stats
 from core.redis import ping as redis_ping
 from db.models import AgentStep, Incident, User
+
+_ID_SEGMENT = re.compile(
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|\d+|[0-9a-fA-F]{16,})$"
+)
+
+
+def _flatten_routes(routes: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    """Every leaf route paired with the URL prefix it was mounted under.
+
+    FastAPI does not keep ``include_router`` results as plain ``Route`` objects — 0.139 wraps
+    each in a private ``_IncludedRouter`` that exposes neither ``.path`` nor ``.routes``, only
+    ``.original_router`` plus an ``include_context`` holding the prefix. The wrapped routes
+    therefore carry ``/auth/session``, not ``/api/v1/auth/session``, so matching them against a
+    real request path silently fails. Anything unrecognised is skipped rather than guessed at.
+    """
+    flat: list[tuple[str, Any]] = []
+    for route in routes or []:
+        if hasattr(route, "path"):
+            flat.append((prefix, route))
+            continue
+        context = getattr(route, "include_context", None)
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            flat.extend(
+                _flatten_routes(
+                    getattr(inner, "routes", None), prefix + getattr(context, "prefix", "")
+                )
+            )
+        elif hasattr(route, "routes"):
+            flat.extend(_flatten_routes(route.routes, prefix))
+    return flat
+
+
+def _normalized_path(path: str) -> str:
+    """Framework-independent fallback: collapse identifier-shaped segments.
+
+    Used when the routing table yields no match, so that a future FastAPI internal change
+    cannot quietly restore the per-URL-budget bypass. It is a backstop, not the primary
+    mechanism: it recognises the *shape* of an id rather than knowing the route.
+    """
+    return "/".join("{id}" if _ID_SEGMENT.match(seg) else seg for seg in path.split("/"))
+
+
+def route_template(request: Request) -> str:
+    """The matched route's *template*, resolved before routing has run.
+
+    ``@app.middleware("http")`` executes outside the router, so ``request.scope["route"]`` is
+    not populated yet — reading it always yields ``None``. The rate limiter did exactly that
+    and silently fell back to the concrete path, which turned the limit into a per-URL budget
+    rather than a per-route one: any caller who varied the id in a parameterised path got a
+    fresh allowance for every URL and was never limited at all (measured: 200 requests to
+    ``/api/v1/incidents/<uuid>`` with a fresh uuid each time produced zero 429s).
+
+    Matching against the routing table here restores the intended bucket. Requests matching no
+    route fall back to identifier-shape normalisation, so spraying random 404s cannot be used
+    to evade the limit either.
+    """
+    path = request.url.path
+    for prefix, route in _flatten_routes(request.app.routes):
+        if prefix and not path.startswith(prefix):
+            continue
+        scope = {**request.scope, "path": path[len(prefix) :] or "/"}
+        match, _ = route.matches(scope)
+        if match is not Match.NONE:
+            # PARTIAL (path matched, method did not) still identifies the template, and the
+            # method is already a separate component of the bucket key.
+            return prefix + str(route.path)
+    return _normalized_path(path)
 
 
 @asynccontextmanager
@@ -38,7 +110,20 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Aegis API", version="0.1.0", lifespan=lifespan)
+    settings = get_settings()
+    # The interactive docs enumerate every route, its schema, and its auth requirements —
+    # a complete map of the attack surface, served unauthenticated. They stay on outside
+    # production because they are genuinely useful while developing, and are switched off by
+    # environment rather than by a flag someone has to remember to set (ESD §16).
+    docs_enabled = settings.environment.lower() not in {"production", "prod"}
+    app = FastAPI(
+        title="Aegis API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
+    )
     install_error_handlers(app)
     app.add_middleware(
         CORSMiddleware,
@@ -69,8 +154,7 @@ def create_app() -> FastAPI:
             else settings.api_rate_limit_per_window
         )
         client_ip = request.client.host if request.client else "unknown"
-        route = request.scope.get("route")
-        scope_key = getattr(route, "path", path)
+        scope_key = route_template(request)
         decision = await check_rate_limit(
             f"{client_ip}:{request.method}:{scope_key}",
             limit=limit,
@@ -99,10 +183,15 @@ def create_app() -> FastAPI:
             settings.ingest_webhook_token
             and request.url.path == "/api/v1/incidents"
             and request.method == "POST"
-            and request.headers.get("x-aegis-webhook-token") != settings.ingest_webhook_token
         ):
-            # Returned, not raised — see error_response(): a raise here would surface as 500.
-            return error_response("webhook_unauthorized", "bad webhook token", status_code=401)
+            # compare_digest, not ``!=``: a plain comparison short-circuits on the first
+            # differing byte, so the response time leaks how much of the token a caller has
+            # guessed and the secret can be recovered a byte at a time. The header is
+            # coerced to str because compare_digest rejects None.
+            presented = request.headers.get("x-aegis-webhook-token") or ""
+            if not secrets.compare_digest(presented, settings.ingest_webhook_token):
+                # Returned, not raised — see error_response(): a raise would surface as 500.
+                return error_response("webhook_unauthorized", "bad webhook token", status_code=401)
         return await call_next(request)
 
     app.include_router(auth.router, prefix="/api/v1")
@@ -111,6 +200,13 @@ def create_app() -> FastAPI:
     app.include_router(actions.router, prefix="/api/v1")
     app.include_router(memory.router, prefix="/api/v1")
 
+    # Registered at both paths deliberately. `/health` is what infrastructure probes —
+    # Kubernetes probes, load balancers, uptime checks — expect, and it is the path ESD §7
+    # documents; a probe hitting it got a 404 while the endpoint sat under `/api/v1`, which
+    # would have read as a dead instance on the first real deployment. The versioned path is
+    # kept because the dashboard already calls it, and an unversioned operational endpoint
+    # should not be forced through API versioning anyway.
+    @app.get("/health")
     @app.get("/api/v1/health")
     async def health(response: Response) -> dict[str, Any]:
         """Dependency health.
@@ -141,12 +237,15 @@ def create_app() -> FastAPI:
             status = "ok"
         return {"status": status, "checks": checks}
 
+    @app.get("/metrics")
     @app.get("/api/v1/metrics")
     async def metrics(_user: User = Depends(get_current_user)) -> dict[str, Any]:
         """Operational counters (ESD §13).
 
-        Authenticated: incident and token counts describe production activity and the Redis
-        keyspace reveals usage patterns, none of which belongs on an anonymous endpoint.
+        Authenticated at both paths — deliberately, even though `/metrics` is conventionally
+        the scrape endpoint. Incident and token counts describe production activity and the
+        Redis keyspace reveals usage patterns, so this stays behind auth and a scraper is
+        given credentials, rather than the endpoint being opened to match convention.
         """
         async with session_scope() as session:
             incidents_by_state = {

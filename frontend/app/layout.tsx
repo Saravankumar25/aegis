@@ -13,7 +13,9 @@ const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem('aegis-theme');
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" data-theme="dark" suppressHydrationWarning>
+    // `data-scroll-behavior` tells Next the smooth scrolling in globals.css is intentional,
+    // which silences its router warning about scroll restoration.
+    <html lang="en" data-theme="dark" data-scroll-behavior="smooth" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>

@@ -16,11 +16,16 @@ from rag.store import upsert_runbook
 RUNBOOK_DIR = Path(__file__).resolve().parents[2] / "eval" / "runbooks"
 
 # filename -> service tags (which services this runbook is most relevant to)
+_ALL_SERVICES = ["checkout-service", "payment-service", "catalog-service"]
 _TAGS = {
-    "oom-crashloop.md": ["checkout-service", "payment-service", "catalog-service"],
-    "error-rate-after-deploy.md": ["checkout-service", "payment-service", "catalog-service"],
+    "oom-crashloop.md": _ALL_SERVICES,
+    "error-rate-after-deploy.md": _ALL_SERVICES,
     "latency-degradation.md": ["checkout-service", "catalog-service"],
-    "pod-unavailable.md": ["checkout-service", "payment-service", "catalog-service"],
+    "pod-unavailable.md": _ALL_SERVICES,
+    # Callers, not callees: pool exhaustion is diagnosed at the service holding the pool.
+    "connection-pool-exhaustion.md": ["checkout-service", "payment-service"],
+    "database-degradation.md": _ALL_SERVICES,
+    "cascading-dependency-failure.md": _ALL_SERVICES,
 }
 
 

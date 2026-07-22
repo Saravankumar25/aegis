@@ -154,3 +154,22 @@ async def guarded(
             error_kind=ErrorKind.malformed_response,
             error=str(exc),
         )
+    except (OSError, httpx.HTTPError) as exc:
+        # Named, not blanket (CLAUDE.md §3). These are environment failures rather than bugs,
+        # and they reached here unclassified: `retry_transient` re-raises anything it judges
+        # non-transient, and a credential file that has been rotated away raises
+        # FileNotFoundError before any request is even attempted. Entry 4 records that the
+        # ServiceAccount token expires every 24h and must be re-minted, so a missing token
+        # file is routine operational weather — exactly the case this envelope exists for.
+        # Letting it escape breaks the contract this module's docstring states: a tool call
+        # never raises across the MCP boundary.
+        get_logger(source=source, tool=tool).warning(
+            "mcp_tool_environment_failure", error_type=type(exc).__name__, error=str(exc)
+        )
+        return ToolResult(
+            ok=False,
+            source=source,
+            tool=tool,
+            error_kind=ErrorKind.unavailable,
+            error=f"{type(exc).__name__}: {exc}",
+        )

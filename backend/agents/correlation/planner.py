@@ -30,6 +30,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agents.correlation.gaps import sanitize_gap_reason
 from agents.correlation.tools import TOOLS_BY_NAME, render_catalog, validate_call
 from agents.evidence import EvidenceStore
 from agents.prompts.library import CORRELATION_PLAN, CORRELATION_SYNTHESIS
@@ -120,7 +121,9 @@ async def _dispatch(gateway: Any, store: EvidenceStore, call: ToolCall) -> tuple
     spec = TOOLS_BY_NAME[call.tool]
     result = await gateway.call(spec.server, spec.tool, call.arguments)
     if not result.get("ok"):
-        reason = result.get("error") or "unavailable"
+        # The error string comes from an MCP tool and can carry an upstream response body,
+        # so it is untrusted text and is sanitised before it becomes a documented gap.
+        reason = sanitize_gap_reason(result.get("error") or "unavailable")
         store.note_gap(call.tool, reason)
         return False, reason
 

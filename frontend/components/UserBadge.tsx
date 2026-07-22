@@ -26,7 +26,10 @@ export function UserBadge() {
 
   if (!user) {
     return (
-      <a href="/login" className="text-[12px] text-muted transition-colors hover:text-fg">
+      <a
+        href="/login"
+        className="whitespace-nowrap rounded text-[12px] text-muted transition-colors hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fg"
+      >
         Sign in
       </a>
     );

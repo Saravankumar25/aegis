@@ -32,6 +32,14 @@ class LLMResult(BaseModel):
     tokens_used: int = Field(ge=0)
     cost_usd: float = Field(ge=0.0)
     latency_ms: int = Field(ge=0)
+    # The prompt/completion split behind ``tokens_used``. Kept separate from the total
+    # rather than derived from it because the two sides price differently and fail
+    # differently: a prompt-token blowup means evidence assembly is over-stuffing the
+    # context, a completion-token blowup means the model is rambling, and the total alone
+    # cannot distinguish them. Default 0 so a provider that reports only a total stays
+    # valid — a missing split must read as "unknown", never as a fabricated breakdown.
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
     # Which prompt produced this, as `id@version+fingerprint`. Recorded on the agent step so
     # a quality change can be attributed to a prompt edit rather than guessed at.
     prompt_ref: str | None = None

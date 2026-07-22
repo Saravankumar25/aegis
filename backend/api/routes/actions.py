@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import get_session, require_role
+from api.deps import get_current_user, get_session, require_role
 from api.errors import AegisError
 from api.events import publish_event
 from api.schemas import (
@@ -181,6 +181,24 @@ async def breaker_clear(
     return BreakerStatusOut(
         tripped=await is_globally_tripped(session), open_trips=0, window_count=cleared
     )
+
+
+@router.get("/kill-switch")
+async def kill_switch_status(
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
+) -> dict:
+    """Current kill-switch state (FR-5.3).
+
+    Added because the UI had no way to read it: only POST existed, so the safety page
+    rendered a hardcoded "Disengaged" that was a *guess*, not a reading. Displaying a
+    fabricated safety state is worse than displaying none — an operator checking whether
+    autonomy is halted would have been told it was running when it may not have been.
+
+    Readable by any authenticated user, including `viewer`. Knowing whether autonomy is
+    halted is not a privileged fact; changing it is, and that stays on the POST.
+    """
+    return {"engaged": await is_kill_switch_engaged(session)}
 
 
 @router.post("/kill-switch")

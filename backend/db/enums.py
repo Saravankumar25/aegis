@@ -25,11 +25,19 @@ class IncidentState(StrEnum):
 
     MVP uses open→investigating→hypothesis_formed→monitoring/resolved→closed (+reopened);
     the remediation_* states are V1.5.
+
+    ``escalated`` is terminal-for-automation: the supervisor concluded the evidence cannot
+    support a hypothesis and further passes would not change that. It exists because
+    without it an escalated incident was left in ``hypothesis_formed``, indistinguishable
+    from one still being worked — so the dashboard could not tell an operator which
+    incidents were waiting on a human, which is the only question that matters during an
+    outage (migration 0009).
     """
 
     open = "open"
     investigating = "investigating"
     hypothesis_formed = "hypothesis_formed"
+    escalated = "escalated"
     remediation_proposed = "remediation_proposed"
     remediation_approved = "remediation_approved"
     remediation_executed = "remediation_executed"

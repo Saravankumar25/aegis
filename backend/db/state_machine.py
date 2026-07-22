@@ -17,10 +17,17 @@ S = IncidentState
 # acts on the hypothesis without any automated remediation. Both are recorded in ESD §6.1.
 LEGAL_TRANSITIONS: dict[IncidentState, frozenset[IncidentState]] = {
     S.open: frozenset({S.investigating}),
-    S.investigating: frozenset({S.hypothesis_formed}),
+    S.investigating: frozenset({S.hypothesis_formed, S.escalated}),
     S.hypothesis_formed: frozenset(
-        {S.remediation_proposed, S.remediation_executed, S.monitoring, S.resolved}
+        {S.remediation_proposed, S.remediation_executed, S.monitoring, S.resolved, S.escalated}
     ),
+    # Escalation is terminal for *automation*, not for the incident. A human still resolves
+    # it, and may hand it back for another automated pass once they have added evidence the
+    # agents could not gather themselves — which is the usual reason an investigation
+    # escalated in the first place. Without the →investigating edge, the only way to retry
+    # would be to reopen a resolved incident, which would falsely record it as having been
+    # resolved.
+    S.escalated: frozenset({S.investigating, S.resolved, S.closed}),
     # → resolved covers the FR-5.2 path: a human rejects the proposal and fixes the
     # incident manually; without this edge a rejected proposal would strand the incident.
     S.remediation_proposed: frozenset({S.remediation_approved, S.resolved}),

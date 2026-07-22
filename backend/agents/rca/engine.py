@@ -94,6 +94,47 @@ def build_prompt(
     )
 
 
+# Confidence is not cosmetic: `consensus_pass` picks the published hypothesis with
+# `max(..., key=confidence)`, so whichever pass reports the highest number is the one a human
+# reads and acts on. A malformed value that resolves *upward* therefore wins the ensemble.
+NEUTRAL_CONFIDENCE = 0.5
+
+
+def _coerce_confidence(value: object) -> float:
+    """Normalise a model's confidence into [0, 1], failing toward neutral, never toward 1.0.
+
+    Three real coercion defects this replaces:
+
+    * ``true`` scored **1.0**. ``isinstance(True, int)`` is True in Python and ``True > 1`` is
+      False, so the percentage branch was skipped and Pydantic coerced the bool straight to
+      maximum confidence — which then won ``consensus_pass`` outright. A model that cannot
+      express a number is the *last* one whose pass should be published.
+    * ``150`` became ``1.5`` and failed ``le=1.0``, dropping an otherwise valid pass. Losing a
+      whole ensemble pass to a formatting quirk is exactly what this parser exists to prevent,
+      and dropped passes then flip ``ensemble_degraded``.
+    * a dict or list passed through untouched and dropped the pass at validation.
+
+    Anything uninterpretable becomes ``NEUTRAL_CONFIDENCE`` rather than an extreme, because a
+    parse failure is an absence of a signal, not evidence of certainty in either direction.
+    """
+    # bool first: it is an int subclass, so every numeric check below would accept it.
+    if isinstance(value, bool):
+        return NEUTRAL_CONFIDENCE
+    if isinstance(value, str):
+        try:
+            value = float(value.strip().rstrip("%"))
+        except ValueError:
+            return NEUTRAL_CONFIDENCE
+    if not isinstance(value, int | float):
+        return NEUTRAL_CONFIDENCE
+    number = float(value)
+    if number != number:  # NaN — comparisons below would silently pass it through
+        return NEUTRAL_CONFIDENCE
+    if number > 1.0:
+        number = number / 100.0  # a percentage, e.g. 85 -> 0.85
+    return min(1.0, max(0.0, number))  # 150% -> 1.0, negatives -> 0.0, never a dropped pass
+
+
 def _parse_pass(raw: str) -> RCAPass | None:
     """Parse one pass's JSON, tolerating the formatting real models actually emit.
 
@@ -104,16 +145,7 @@ def _parse_pass(raw: str) -> RCAPass | None:
     payload = parse_json_object(raw)
     if payload is None:
         return None
-    # Models occasionally emit confidence as a percentage ("85") or a string.
-    confidence = payload.get("confidence")
-    if isinstance(confidence, str):
-        try:
-            confidence = float(confidence.strip().rstrip("%"))
-        except ValueError:
-            confidence = None
-    if isinstance(confidence, int | float) and confidence > 1:
-        confidence = confidence / 100.0
-    payload["confidence"] = confidence if confidence is not None else 0.5
+    payload["confidence"] = _coerce_confidence(payload.get("confidence"))
     # Drop malformed claim entries rather than failing the whole pass.
     claims = payload.get("claims")
     payload["claims"] = (

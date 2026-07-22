@@ -21,31 +21,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <header className="sticky top-0 z-40 border-b border-edge bg-bg/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3">
-          <Link href="/" className="text-[15px] font-semibold tracking-tight">
+        <div className="mx-auto flex max-w-6xl items-center gap-x-4 gap-y-2 px-4 py-3 sm:gap-x-6 sm:px-6">
+          <Link
+            href="/"
+            className="rounded text-[15px] font-semibold tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fg"
+          >
             Aegis
           </Link>
-          <nav className="flex gap-5 text-[13px]">
+          <nav aria-label="Primary" className="flex gap-3 text-[13px] sm:gap-5">
             {NAV.map((item) => {
               const active = pathname.startsWith(item.href);
               return (
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={active ? "text-fg" : "text-muted transition-colors hover:text-fg"}
+                  aria-current={active ? "page" : undefined}
+                  className={`whitespace-nowrap rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fg ${
+                    active ? "text-fg" : "text-muted transition-colors hover:text-fg"
+                  }`}
                 >
                   {item.label}
                 </Link>
               );
             })}
           </nav>
-          <div className="ml-auto flex items-center gap-4">
+          <div className="ml-auto flex shrink-0 items-center gap-3 sm:gap-4">
             <UserBadge />
             <ThemeToggle />
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</main>
     </>
   );
 }

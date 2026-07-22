@@ -231,11 +231,16 @@ async def search_runbooks(
     k: int | None = None,
     service: str | None = None,
     rerank: bool | None = None,
+    min_score_override: float | None = None,
 ) -> list[RetrievedChunk]:
     """Hybrid retrieval over runbook chunks.
 
     ``service`` applies metadata filtering *inside* both retrievers rather than filtering
     their output, so the candidate pool is spent on rows that can actually qualify.
+
+    ``min_score_override`` replaces the configured relevance floor; pass ``-inf`` to disable
+    it. Only the calibration harness does — it must observe the unfiltered score
+    distribution to have anything to calibrate against.
     """
     settings = get_settings()
     k = k or settings.rag_top_k
@@ -272,19 +277,29 @@ async def search_runbooks(
     shortlist = ordered_ids[:candidate_k]
     scores: dict[str, float] = {i: fused[i] for i in shortlist}
 
+    # Whether the surviving scores carry relevance meaning at all. RRF scores are rank
+    # artefacts in the ~0.016–0.03 range and say nothing about whether a chunk answers the
+    # query; cross-encoder logits do. The floor is therefore gated on reranking having
+    # actually run, not merely on being configured — thresholding a fused rank would either
+    # drop everything or nothing depending on corpus size, which is how a relevance filter
+    # becomes a silent outage.
+    reranked_scores = False
     if rerank and len(shortlist) > 1:
         passages = [by_id[i].content for i in shortlist]
         reranked = await get_reranker().score(query, passages)
         if reranked is not None:
             scores = dict(zip(shortlist, reranked, strict=True))
             shortlist = sorted(shortlist, key=lambda i: scores[i], reverse=True)
+            reranked_scores = True
+
+    floor = settings.rag_min_score if min_score_override is None else min_score_override
 
     results: list[RetrievedChunk] = []
     for chunk_id in shortlist[:k]:
         chunk = by_id[chunk_id]
         parent = runbooks.get(chunk.runbook_id)
         score = float(scores[chunk_id])
-        if settings.rag_min_score and score < settings.rag_min_score:
+        if reranked_scores and score < floor:
             continue
         results.append(
             RetrievedChunk(

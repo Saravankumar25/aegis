@@ -156,8 +156,22 @@ class Settings(BaseSettings):
     # Reciprocal Rank Fusion constant. 60 is the value from the original RRF paper and damps
     # the influence of any single retriever's top rank.
     rag_rrf_k: int = Field(default=60)
+    # Relevance floor, in cross-encoder logit space, applied ONLY when reranking actually
+    # ran — a fused RRF score is a rank artefact and thresholding it would drop everything or
+    # nothing depending on corpus size. Calibrated, not chosen: `python -m evaluation.calibration`
+    # sweeps this against the golden dataset and reports hit rate, refusal rate and the
+    # relevant chunks each candidate costs. At -11.0 the measured result is hit_rate 1.00 and
+    # refusal_rate 1.00 — every answerable query still finds its runbook, and the
+    # out-of-domain query correctly returns nothing.
+    #
+    # The value is negative because the model saturates near -11.2 for content it considers
+    # unrelated, while a *relevant* passage phrased in an operator's own words scores around
+    # -4. A naive "score > 0" floor would discard exactly the paraphrased retrieval the
+    # semantic embedder exists to serve. Re-run the calibration after any corpus or reranker
+    # change; the number is only meaningful against the distribution it was measured on.
     rag_min_score: float = Field(
-        default=0.0, description="Drop hits below this fused score; 0 disables the filter."
+        default=-11.0,
+        description="Drop reranked hits below this logit. Calibrated by evaluation.calibration.",
     )
 
     # --- LangSmith tracing (ESD §13). Unset = tracing is a no-op; an observability

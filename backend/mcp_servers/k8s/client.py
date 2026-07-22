@@ -13,6 +13,7 @@ the credential files entirely.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,41 @@ from mcp_servers.k8s.models import (
 )
 
 SOURCE = "k8s"
+
+# RFC 1123 label, which is what Kubernetes actually permits for object and namespace names.
+# Deliberately an allowlist of the legal shape rather than a denylist of "../" and friends:
+# httpx normalises dot-segments *before* the request goes out, and encodings, unicode
+# lookalikes and double-encoding give a denylist far more edges than it can cover.
+_K8S_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_MAX_NAME_LENGTH = 253
+
+
+class UnsafeResourceName(ValueError):
+    """A namespace or object name that must never be interpolated into a request path.
+
+    This is a *path traversal* guard, and the threat model is specific: the Correlation
+    agent chooses these arguments, and it chooses them by reading pod logs and k8s events —
+    text an attacker who can write a log line controls. A name like
+    ``../../../../api/v1/namespaces/kube-system/secrets`` normalises to exactly that path,
+    so an injected log line could aim a read-only ServiceAccount at cluster secrets.
+
+    RBAC is the control that actually denies this (the SA has no `get secrets`), and it
+    holds. But a tool layer that contributes no defence of its own leaves the whole
+    protection resting on one binding being correct forever, and bindings drift. This makes
+    the tool layer refuse to construct the request at all.
+    """
+
+
+def _validate_name(value: str, *, kind: str) -> str:
+    """Return ``value`` if it is a legal Kubernetes name, else raise.
+
+    Raises rather than sanitising: silently rewriting an attacker-supplied name would send
+    a *different* request than the one requested and hide that it happened. A refusal
+    surfaces as a documented gap the Observer can see.
+    """
+    if not value or len(value) > _MAX_NAME_LENGTH or not _K8S_NAME.match(value):
+        raise UnsafeResourceName(f"illegal {kind} name: {value[:80]!r}")
+    return value
 
 
 class K8sClient:
@@ -88,6 +124,7 @@ class K8sClient:
             raise MalformedResponseError(f"k8s API returned unparseable JSON: {exc}") from exc
 
     async def list_pods(self, namespace: str) -> tuple[list[PodSummary], int]:
+        _validate_name(namespace, kind="namespace")
         response, attempts = await self._get(
             f"/api/v1/namespaces/{namespace}/pods", tool="list_pods", params={"limit": 200}
         )
@@ -99,6 +136,8 @@ class K8sClient:
         return pods, attempts
 
     async def get_pod(self, name: str, namespace: str) -> tuple[PodDetail, int]:
+        _validate_name(namespace, kind="namespace")
+        _validate_name(name, kind="pod")
         response, attempts = await self._get(
             f"/api/v1/namespaces/{namespace}/pods/{name}", tool="get_pod"
         )
@@ -115,6 +154,8 @@ class K8sClient:
         container: str | None = None,
         tail_lines: int = 200,
     ) -> tuple[PodLogs, int]:
+        _validate_name(namespace, kind="namespace")
+        _validate_name(name, kind="pod")
         params: dict[str, Any] = {"tailLines": tail_lines}
         if container:
             params["container"] = container
@@ -131,6 +172,7 @@ class K8sClient:
         return logs, attempts
 
     async def list_events(self, namespace: str) -> tuple[list[EventSummary], int]:
+        _validate_name(namespace, kind="namespace")
         response, attempts = await self._get(
             f"/api/v1/namespaces/{namespace}/events", tool="list_events", params={"limit": 200}
         )
@@ -142,6 +184,7 @@ class K8sClient:
         return events, attempts
 
     async def list_deployments(self, namespace: str) -> tuple[list[DeploymentSummary], int]:
+        _validate_name(namespace, kind="namespace")
         response, attempts = await self._get(
             f"/apis/apps/v1/namespaces/{namespace}/deployments",
             tool="list_deployments",
@@ -157,6 +200,8 @@ class K8sClient:
     # --- V1.5 write operations (writer SA only; forward actions of Tier-1/2) -----------
 
     async def restart_pod(self, name: str, namespace: str) -> tuple[dict[str, Any], int]:
+        _validate_name(namespace, kind="namespace")
+        _validate_name(name, kind="pod")
         """Delete one pod; its Deployment recreates it (the Tier-1 'restart')."""
         response, attempts = await retry_transient(
             lambda: self._http.delete(
@@ -175,6 +220,8 @@ class K8sClient:
         self, name: str, replicas: int, namespace: str
     ) -> tuple[dict[str, Any], int]:
         """Patch the /scale subresource — the replicas-only write surface (ESD §16)."""
+        _validate_name(namespace, kind="namespace")
+        _validate_name(name, kind="deployment")
         current, _ = await retry_transient(
             lambda: self._http.get(
                 f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",

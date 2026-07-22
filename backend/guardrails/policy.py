@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from core.logging import get_logger
-from redaction.pipeline import redact
+from redaction.pipeline import SECRET_LITERALS, redact
 
 _log = get_logger(component="guardrails")
 
@@ -100,15 +100,12 @@ _JAILBREAK_PATTERNS = [(re.compile(p, re.IGNORECASE), name) for p, name in _JAIL
 # Checked on OUTPUT only. If a model ever emits something shaped like a credential, that
 # content must not continue to Slack, a dashboard, or a database — regardless of how it got
 # there. This is the one place guardrails fail closed.
-_SECRET_EGRESS = [
-    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "private_key"),
-    (r"\bsk-[A-Za-z0-9_-]{16,}", "api_key"),
-    (r"\bAIza[0-9A-Za-z_-]{35}\b", "google_api_key"),
-    (r"\bghp_[A-Za-z0-9]{36}\b", "github_token"),
-    (r"\bxox[baprs]-[A-Za-z0-9-]{10,}", "slack_token"),
-    (r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "jwt"),
-]
-_SECRET_PATTERNS = [(re.compile(p), name) for p, name in _SECRET_EGRESS]
+# The table itself lives in ``redaction.pipeline`` and is imported rather than restated. It
+# was previously duplicated here, and the two copies had already drifted: this list knew
+# nothing about LangSmith keys or Slack webhook URLs, and its GitHub pattern required exactly
+# 36 characters, which misses the newer fine-grained tokens. One definition means a credential
+# format added for ingress redaction is automatically blocked on egress too.
+_SECRET_PATTERNS = list(SECRET_LITERALS)
 
 # Phrases that indicate the model is answering from general knowledge rather than from the
 # evidence it was given. Not proof of a hallucination, but a reliable smell: grounded output

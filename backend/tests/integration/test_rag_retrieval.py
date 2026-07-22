@@ -97,11 +97,33 @@ async def test_lexical_retrieval_catches_exact_identifier(session: AsyncSession)
 
 
 async def test_metadata_filter_excludes_other_services(session: AsyncSession):
-    """A runbook for a service that is not on fire is a distractor, not a result."""
+    """A runbook for a service that is not on fire is a distractor, not a result.
+
+    The query is one the catalog runbook can actually answer. It used to be "restarts and
+    memory", which only the *checkout* runbook covers — and the assertion passed because
+    filtering to catalog-service returned the latency runbook regardless of whether it was
+    relevant. The calibrated relevance floor now rejects that, correctly: matching a service
+    tag is not the same as answering the question, and returning an unrelated runbook
+    because it belongs to the right service is precisely the distractor this test names.
+    """
     await _seed(session)
-    hits = await search_runbooks(session, "restarts and memory", k=5, service="catalog-service")
+    hits = await search_runbooks(
+        session, "response times climbing with no errors", k=5, service="catalog-service"
+    )
     assert hits
     assert all("catalog-service" in h.service_tags for h in hits)
+
+
+async def test_metadata_filter_does_not_rescue_an_irrelevant_runbook(session: AsyncSession):
+    """Service scoping narrows candidates; it must not lower the relevance bar.
+
+    Only the latency runbook is tagged `catalog-service`, so a memory question scoped to
+    that service has no real answer. Returning the latency runbook anyway would hand RCA an
+    authoritative-looking passage about the wrong failure mode.
+    """
+    await _seed(session)
+    hits = await search_runbooks(session, "restarts and memory", k=5, service="catalog-service")
+    assert hits == [], f"irrelevant runbook survived a service filter: {[h.title for h in hits]}"
 
 
 async def test_citation_does_not_repeat_the_title(session: AsyncSession):

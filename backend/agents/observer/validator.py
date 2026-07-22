@@ -46,6 +46,10 @@ class ObserverVerdict(BaseModel):
     claim_verdicts: list[ClaimVerdict] = Field(default_factory=list)
     rejected_count: int = 0
     flagged_evidence: list[dict] = Field(default_factory=list)  # {evidence_id, pattern}
+    # Injection patterns found in *documented gaps* rather than in evidence. Tracked
+    # separately because nothing can cite a gap, so this can never feed `cites_poisoned`
+    # — it is a signal for the operator, not an input to the approval decision.
+    flagged_gaps: list[dict] = Field(default_factory=list)  # {gap, pattern}
     category_supported: bool = True
     category_reason: str = ""
     notes: str = ""
@@ -189,6 +193,29 @@ def screen_evidence(store: EvidenceStore) -> list[dict]:
     return flagged
 
 
+def screen_gaps(store: EvidenceStore) -> list[dict]:
+    """Flag documented gaps whose text looks like instructions rather than an error.
+
+    A gap's text is the error string an MCP tool returned, so it is attacker-reachable the
+    same way a log line is — and it lands in four prompts *outside* any ``<evidence>`` tag,
+    where ``EVIDENCE_RULES`` does not reach. ``screen_evidence`` only ever looked at
+    ``store.items``, so this channel was invisible to the Observer entirely.
+
+    This **records and does not block**, matching the project's ingress-fails-open rule: a
+    gap is produced by a source *failing*, so letting flagged gap text veto an investigation
+    would let anyone who can make an MCP call fail with a crafted error message shut incident
+    response down. Blocking here would build the denial-of-service the convention exists to
+    prevent.
+    """
+    flagged: list[dict] = []
+    for gap in store.gaps:
+        for pattern in INJECTION_PATTERNS:
+            if pattern.search(gap):
+                flagged.append({"gap": gap[:200], "pattern": pattern.pattern})
+                break
+    return flagged
+
+
 def validate_claims(claims: list[dict], store: EvidenceStore) -> list[ClaimVerdict]:
     """FR-3.2: every claim must cite a real piece of gathered evidence."""
     verdicts: list[ClaimVerdict] = []
@@ -231,6 +258,7 @@ def review(
     """
     claim_verdicts = validate_claims(claims, store)
     flagged = screen_evidence(store)
+    flagged_gaps = screen_gaps(store)
     rejected = [v for v in claim_verdicts if not v.valid]
     poisoned_ids = {f["evidence_id"] for f in flagged}
     cites_poisoned = [v for v in claim_verdicts if v.valid and v.evidence_id in poisoned_ids]
@@ -251,11 +279,15 @@ def review(
         notes.append("no claims presented")
     if not category_supported:
         notes.append(f"unsupported root cause: {category_reason}")
+    if flagged_gaps:
+        # Surfaced, never subtracted from `approved` — see `screen_gaps`.
+        notes.append(f"{len(flagged_gaps)} documented gap(s) contain instruction-like text")
     return ObserverVerdict(
         approved=approved,
         claim_verdicts=claim_verdicts,
         rejected_count=len(rejected) + len(cites_poisoned),
         flagged_evidence=flagged,
+        flagged_gaps=flagged_gaps,
         category_supported=category_supported,
         category_reason=category_reason,
         notes="; ".join(notes) or "all claims validated",

@@ -257,6 +257,8 @@ class OpenRouterProvider(LLMProvider):
                     text=strip_code_fences(text),
                     model=model,
                     tokens_used=int(usage.get("total_tokens") or 0),
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
                     cost_usd=float(usage.get("cost") or 0.0),
                     latency_ms=latency_ms,
                     prompt_ref=prompt_ref,

@@ -325,6 +325,15 @@ class GeminiProvider(LLMProvider):
                     text=strip_code_fences(text),
                     model=model,
                     tokens_used=tokens,
+                    prompt_tokens=int(usage.get("promptTokenCount") or 0),
+                    # `candidatesTokenCount` counts only emitted text. Thinking-heavy
+                    # models bill hidden reasoning under `thoughtsTokenCount`, which is
+                    # in the total but not in candidates — omitting it would report a
+                    # completion far cheaper than the one actually paid for.
+                    completion_tokens=(
+                        int(usage.get("candidatesTokenCount") or 0)
+                        + int(usage.get("thoughtsTokenCount") or 0)
+                    ),
                     # The Gemini API reports no price. Rather than invent one from a
                     # hardcoded rate card that silently goes stale, cost is reported as
                     # 0.0 and the *token* budget (ESD §15) remains the real control.
