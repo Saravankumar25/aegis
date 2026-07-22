@@ -106,3 +106,29 @@ The checked-in infrastructure deploys the simulated Meridian services to `kind`,
 | `infra` | Operate the local kind/Meridian/Prometheus environment. |
 
 Next: [AI system and LangGraph](./ai-system.mdx) · [Security and safety](./security-and-safety.mdx).
+
+## Design choices in plain language
+
+### Durable state before live presentation
+
+The dashboard is a view of persisted work, not a second source of truth. A graph node first writes its agent step, message, citations, and event-related state to Postgres. It then publishes an SSE notification. If the browser disconnects, it can retrieve the complete detail or replay endpoint later. This prevents a missed real-time message from becoming a missing investigation record.
+
+### A worker, not a long HTTP request
+
+An alert API request is intentionally short: it validates and stores the alert. Model calls and infrastructure calls can be slow, retry, or degrade. Performing those inside an HTTP request would make client retries hard to distinguish from new incidents and would make a browser timeout look like an investigation failure. The worker gives each incident an explicit owner lock and can recover abandoned work.
+
+### Multiple narrow controls instead of one “AI safety” switch
+
+No single prompt is treated as a protection boundary. Tool allowlists control evidence capability, roles control human authority, state transitions control timing, and the remediation engine checks kill switch, expiry, approval/tier, Observer result, blast radius, circuit breaker, and lease. A defect or poor model result in one layer does not automatically bypass the rest.
+
+## Meridian topology
+
+Meridian has three statically declared services. The topology is used twice: Correlation uses it to identify likely upstream/downstream evidence, and Resolution uses it to estimate a remediation’s blast radius.
+
+```mermaid
+flowchart LR
+  Checkout[checkout-service] --> Payment[payment-service]
+  Checkout --> Catalog[catalog-service]
+```
+
+For example, a failure in `payment-service` has `checkout-service` as a dependent. A Tier-1 action whose dependent count exceeds `MAX_BLAST_RADIUS_DEPENDENTS` is refused and must be handled by a human.

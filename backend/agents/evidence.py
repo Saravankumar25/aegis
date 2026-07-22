@@ -48,8 +48,13 @@ class EvidenceStore(BaseModel):
         self.items.append(item)
         return item
 
-    def note_gap(self, source: str, reason: str) -> None:
+    def note_gap(self, source: str, reason: str) -> str:
         """Record an unavailable evidence source, sanitising the reason first.
+
+        Returns the sanitised reason so a caller that needs the text — to return it, log it,
+        or show it — gets the safe version without sanitising again. Handing back the raw
+        argument would leave every caller one forgotten call away from reintroducing the
+        bypass this method exists to close.
 
         Sanitisation lives *here*, not at the call sites, and that placement is the point.
         A gap reason is the error string an MCP tool returned — attacker-reachable exactly
@@ -66,7 +71,9 @@ class EvidenceStore(BaseModel):
         """
         from agents.correlation.gaps import sanitize_gap_reason
 
-        self.gaps.append(f"{source}: {sanitize_gap_reason(reason)}")
+        safe = sanitize_gap_reason(reason)
+        self.gaps.append(f"{source}: {safe}")
+        return safe
 
     def get(self, evidence_id: str) -> EvidenceItem | None:
         return next((i for i in self.items if i.id == evidence_id), None)

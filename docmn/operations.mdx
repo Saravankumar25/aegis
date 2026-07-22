@@ -51,3 +51,19 @@ The code treats Postgres as authoritative. Back up/restore it using normal Postg
 ## Escalation checklist
 
 When an investigation cannot progress, capture the incident id, current state, latest agent step, Observer verdict, evidence gaps, and action gate refusal (if any). These are persisted specifically so a human can continue from the recorded state rather than reconstructing the investigation from transient logs.
+
+## Local environment lifecycle
+
+The repository contains helpers for the demo environment, but they are not an Aegis control plane. Use the infrastructure scripts and manifests as local-development assets:
+
+| Asset | Purpose |
+| --- | --- |
+| `infra/kind/cluster.yaml` | Defines the local kind cluster configuration and port mappings. |
+| `infra/setup-cluster.sh` | Sets up the local cluster environment. |
+| `infra/manifests/meridian-services.yaml` | Deploys the simulated commerce services. |
+| `infra/kube-prometheus-stack/values.yaml` | Configures local Prometheus/Grafana-oriented stack values. |
+| `infra/gen-mcp-credentials.sh` | Creates local Kubernetes service-account credential material used by MCP. |
+| `infra/inject-failure.sh` | Helps exercise the supplied failure scenarios. |
+
+> [!WARNING]
+> The writer credential is intentionally separate from the read-only Kubernetes credential. Do not replace the read credential with a broad administrator kubeconfig just to simplify local setup; doing so defeats the capability boundary that the tests and safety model rely on.

@@ -81,3 +81,34 @@ When the incident is resolved, an on-call engineer or admin can resolve it in th
 ## If Aegis cannot reach a conclusion
 
 An `escalated` state or rejected Observer verdict is useful information: it tells you the system’s bounded automated path has ended. Continue with the recorded evidence, gaps, and runbook search rather than assuming a missing conclusion means the incident is harmless. See [Operations](./operations.mdx#escalation-checklist).
+
+## Read the incident states
+
+| State | Meaning for an operator |
+| --- | --- |
+| `open` | The alert was stored but has not yet been claimed for investigation. |
+| `investigating` | A worker owns the investigation. Watch its timeline; do not infer success from this state alone. |
+| `hypothesis_formed` | The graph has produced an RCA outcome. Check the Observer verdict and citations. |
+| `remediation_proposed` | An approval-required proposal is waiting for a human decision. |
+| `remediation_approved` | A human approved a Tier-2 action; the worker still needs to pass execution gates. |
+| `remediation_executed` | The remediation engine recorded an execution result. Continue monitoring the customer impact. |
+| `monitoring` | The system is in the post-hypothesis observation portion of the lifecycle. |
+| `resolved` | A human resolved the incident; a draft memory summary may be waiting. |
+| `escalated` | Automation stopped because it could not safely reach a supported outcome. |
+| `closed` / `reopened` | Lifecycle closure and later re-entry states available in the state machine. |
+
+## A careful approval example
+
+Suppose Aegis proposes `scale_deployment` for `payment-service` after an observed saturation pattern. The proposal is Tier 2. Before clicking approve, confirm that the target is exactly the expected Meridian deployment, the cited metrics show the condition still exists, the stated previous replica count is available for the compensating scale-back, and the dependent blast-radius description makes sense. If any of those facts are stale or unclear, reject the proposal and use the normal operating process instead.
+
+The API reflects the same workflow:
+
+```json
+{
+  "action_id": "<remediation-action-uuid>",
+  "decision": "approved",
+  "notes": "Metrics and current deployment state reviewed by on-call."
+}
+```
+
+The request is sent to `POST /api/v1/actions/incidents/{incident_id}/approvals`. It is an approval record, not an instruction for the API server to modify Kubernetes synchronously.

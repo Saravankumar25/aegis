@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agents.correlation.gaps import sanitize_gap_reason
 from agents.evidence import EvidenceStore
 from agents.topology import dependencies_of, dependents_of
 from core.config import get_settings
@@ -51,7 +50,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
         )
     else:
         store.note_gap(
-            "k8s.list_pods", sanitize_gap_reason(pods_result.get("error") or "unavailable")
+            "k8s.list_pods", pods_result.get("error") or "unavailable"
         )
 
     if service_pods:
@@ -68,7 +67,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
             )
         else:
             store.note_gap(
-                "k8s.get_pod_logs", sanitize_gap_reason(logs_result.get("error") or "unavailable")
+                "k8s.get_pod_logs", logs_result.get("error") or "unavailable"
             )
 
     events_result = await gateway.call("k8s", "list_events", {})
@@ -89,7 +88,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
             )
     else:
         store.note_gap(
-            "k8s.list_events", sanitize_gap_reason(events_result.get("error") or "unavailable")
+            "k8s.list_events", events_result.get("error") or "unavailable"
         )
 
     # --- prometheus: error rate + latency for the service's pods ---
@@ -112,7 +111,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
     else:
         store.note_gap(
             "prometheus.query_metrics",
-            sanitize_gap_reason(metrics_result.get("error") or "unavailable"),
+            metrics_result.get("error") or "unavailable",
         )
 
     alerts_result = await gateway.call("prometheus", "list_alerts", {})
@@ -128,7 +127,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
     else:
         store.note_gap(
             "prometheus.list_alerts",
-            sanitize_gap_reason(alerts_result.get("error") or "unavailable"),
+            alerts_result.get("error") or "unavailable",
         )
 
     # --- github: recent deploys/changes (temporal dimension, FR-2.2) ---
@@ -161,7 +160,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
     else:
         store.note_gap(
             "github.get_recent_commits",
-            sanitize_gap_reason(commits_result.get("error") or "unavailable"),
+            commits_result.get("error") or "unavailable",
         )
 
     # --- correlate: temporal × topological (FR-2.3) ---

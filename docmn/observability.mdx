@@ -1,0 +1,84 @@
+# Observability guide
+
+Aegis uses complementary signals rather than treating one dashboard as enough:
+
+- **Structured logs** describe component activity and failures as they happen.
+- **Database history** explains durable incident progress and decisions.
+- **SSE** keeps the operator interface current.
+- **Health and metrics endpoints** report dependency and aggregate runtime state.
+- **LangSmith tracing** is optional deep visibility into graph/model execution.
+
+## What to look at first
+
+| Question | Best first source |
+| --- | --- |
+| Is the API safe to receive traffic? | `/health` or `/api/v1/health`. |
+| Is the dashboard showing current persisted progress? | Incident detail plus its SSE stream. |
+| Which agent/model/evidence led to a hypothesis? | Agent steps, citations, explanations, and optional LangSmith trace. |
+| Why did a proposed action not run? | Remediation status, audit entries, and the gate refusal path. |
+| Is cache/rate-limit infrastructure healthy? | Authenticated `/metrics` Redis section and logs. |
+
+## Health semantics
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "postgres": "ok",
+    "redis": "unreachable"
+  }
+}
+```
+
+This response remains HTTP 200 because Redis is a cache/rate-limit dependency and calls degrade around it. A Postgres failure returns HTTP 503: without canonical persistence, Aegis should not claim it can serve correct incident state.
+
+## Metrics semantics
+
+`GET /metrics` and `GET /api/v1/metrics` require an authenticated user. They return:
+
+| Section | Values |
+| --- | --- |
+| `incidents_by_state` | A count keyed by persisted incident lifecycle state. |
+| `llm` | Agent-step count, total persisted token usage, total reported cost, and mean latency when present. |
+| `redis` | Connected clients, used memory, keyspace hit/miss counts, calculated hit rate when meaningful, and uptime. |
+
+An idle Redis instance reports a null hit rate rather than `0.0`; “no lookups yet” is different from a measured zero-percent cache effectiveness.
+
+## Structured logging
+
+The backend configures structured logging during application startup. Incident-scoped work is designed to carry `incident_id`, giving an operator a stable correlation key across API, worker, graph, and agent activity. Logs record bounded degradation—for example, unavailable correlation planning or an MCP tool error—without making those failures invisible.
+
+> [!WARNING]
+> Treat logs as operational diagnostics, not a safe place for raw credentials or arbitrary external text. Evidence redaction and gap sanitization are specifically designed to keep untrusted/secret-bearing text out of normal prompt and persistence pathways.
+
+## SSE observability
+
+Each incident has a stream, and there is an all-incidents stream. The per-incident stream sends a snapshot before live named events; both streams emit a keepalive comment every 15 seconds while idle. A disconnected stream does not imply the worker stopped. Confirm the incident state/detail record before diagnosing a stalled investigation.
+
+Common client observations:
+
+| Observation | Interpretation / next check |
+| --- | --- |
+| Stream reconnects but detail is current | Normal transient connection interruption. |
+| No events, detail has new agent steps | SSE delivery/client issue; data persistence is healthy. |
+| No events and no new steps | Check worker claim, provider/tool dependencies, and structured logs. |
+| Snapshot returns but subsequent updates stop | Confirm browser credentials/proxy behavior and the API process/event hub. |
+
+## LangSmith tracing
+
+Set `LANGSMITH_API_KEY` to enable tracing. The implementation sets LangSmith process environment settings before SDK use, creates graph/agent/provider spans, and tags traces with incident and service identifiers. Provider traces include model attribution, prompt reference, token usage, cost when available, latency, and schema repair attempts.
+
+Tracing is intentionally non-load-bearing. If the credential is absent or the LangSmith SDK/service is unavailable, tracing helpers return no-op behavior. A monitoring outage cannot be allowed to prevent incident response.
+
+### Trace investigation checklist
+
+1. Find the trace using the persisted incident id/service tag.
+2. Compare model/provider attribution with the agent step stored in Postgres.
+3. Inspect bounded tool calls, prompt reference, repair attempts, and latency.
+4. Use the persisted citation/Observer verdict as the operator-facing audit record; do not rely on a third-party trace as the only evidence of what happened.
+
+## Alerts about Aegis itself
+
+The repository provides health and aggregate metrics, but it does not include a production Aegis alert-rules package or a managed observability deployment. For the local environment, configure probes against `/health`, secure access to metrics, and alert on Postgres unavailability first because it is source-of-truth critical.
+
+Related: [Operations](./operations.mdx) · [Backend guide](./backend.mdx) · [API reference](./api-reference.mdx).

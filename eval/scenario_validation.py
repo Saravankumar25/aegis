@@ -42,7 +42,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -151,7 +153,11 @@ class RunOutcome:
     tokens: int = 0
     cost_usd: float = 0.0
     wall_seconds: float = 0.0
+    # The fault magnitude actually observed when the alert fired. Present in the report so a
+    # reader can tell a real result from one measured against a healthy service.
+    signal_at_alert: str = ""
     error: str = ""
+    harness_error: bool = False
 
 
 # --- infrastructure helpers ----------------------------------------------------------------
@@ -165,27 +171,192 @@ def _webhook_token() -> str:
     return match.group(1).strip()
 
 
-def _inject(action: str, service: str, arg: str = "") -> None:
-    """Apply a fault to every replica (the script handles per-pod addressing)."""
-    cmd = ["bash", str(REPO_ROOT / "infra" / "inject-failure.sh"), action, service]
-    if arg:
-        cmd.append(arg)
-    subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+class HarnessError(RuntimeError):
+    """The environment could not be put into the state the scenario requires.
+
+    Deliberately distinct from a scenario *result*. A run where the fault never took hold
+    measures nothing about the agents, and scoring it as an AI failure is worse than
+    discarding it — it manufactures evidence of a defect that does not exist. This is not
+    hypothetical: an earlier campaign reported `category=unknown` on 8/8 runs and was read as
+    a reasoning regression. The agents had been handed a healthy service and correctly
+    declined to name a cause.
+    """
 
 
-def _prom_error_rate(service: str) -> float:
-    query = (
-        f'sum(rate(http_requests_total{{namespace="{NAMESPACE}",'
-        f'pod=~"{service}.*",status="500"}}[2m]))'
+def _kubectl(*args: str, timeout: int = 240) -> subprocess.CompletedProcess[str]:
+    """Run kubectl directly. No shell, no path translation.
+
+    The harness originally shelled out to `infra/inject-failure.sh` via bash, which is
+    unusable from a native Windows Python process: MSYS rewrites path arguments on the way
+    in, so `C:\\dev\\...` arrived as `C:devAegis...` and `/c/dev/...` did not resolve either.
+    Every injection failed with exit 127 — and because the call passed `check=False`, it
+    failed *silently*. The campaign then alerted on perfectly healthy services and reported
+    `category=unknown` on 8/8 runs, which was read as an AI reasoning regression. It was the
+    harness. kubectl is a native executable invoked without a shell, so the whole class of
+    quoting and translation bugs disappears.
+    """
+    result = subprocess.run(
+        ["kubectl", *args], capture_output=True, text=True, timeout=timeout, check=False
     )
+    if result.returncode != 0:
+        raise HarnessError(
+            f"kubectl {' '.join(args)[:120]} exited {result.returncode}: "
+            f"{(result.stderr or result.stdout)[:300]}"
+        )
+    return result
+
+
+def _pod_ips(service: str) -> list[str]:
+    result = _kubectl(
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        f"app={service}",
+        "--field-selector=status.phase=Running",
+        "-o",
+        "jsonpath={range .items[*]}{.status.podIP}{'\\n'}{end}",
+    )
+    return [ip.strip() for ip in result.stdout.splitlines() if ip.strip()]
+
+
+def _inject(action: str, service: str, arg: str = "") -> str:
+    """Apply a fault to EVERY replica of a service, or raise.
+
+    Per-replica by necessity: failure mode is per-process in-memory state, so addressing the
+    Service load-balances to one pod and applies the fault to a fraction of traffic without
+    saying so — "inject 70%" then shows up as a ~35% error rate across two replicas.
+    """
+    if action == "killpod":
+        _kubectl(
+            "-n",
+            NAMESPACE,
+            "delete",
+            "pod",
+            "-l",
+            f"app={service}",
+            "--grace-period=0",
+            "--force",
+        )
+        return "killpod"
+
+    # Branches, not a dict literal: a dict evaluates every value, so `int(arg)` would run for
+    # a latency body even on an error injection where arg is "0.6" — and raise.
+    if action == "error":
+        body: dict[str, Any] = {"mode": "error", "rate": float(arg or 0.5)}
+    elif action == "latency":
+        body = {"mode": "latency", "rate": 1.0, "latency_ms": int(arg or 800)}
+    elif action == "clear":
+        body = {"mode": "none", "rate": 0.0}
+    else:
+        raise HarnessError(f"unknown fault action: {action!r}")
+
+    ips = _pod_ips(service)
+    if not ips:
+        raise HarnessError(f"no running pods for app={service} in {NAMESPACE}")
+
+    # One throwaway curl pod addressing every replica in a single invocation: a pod per
+    # replica costs several seconds each, which matters across a campaign.
+    urls = [f"http://{ip}:8080/admin/failure" for ip in ips]
+    result = _kubectl(
+        "-n",
+        NAMESPACE,
+        "run",
+        f"aegis-inject-{uuid.uuid4().hex[:8]}",
+        "--rm",
+        "-i",
+        "--restart=Never",
+        "--image=curlimages/curl:8.10.1",
+        "--",
+        "-s",
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        json.dumps(body),
+        *urls,
+    )
+    applied = result.stdout.count('"applied"')
+    if applied < len(ips):
+        raise HarnessError(
+            f"fault '{action}' applied to {applied}/{len(ips)} replicas of {service}; "
+            f"a partially-faulted service produces evidence nobody can interpret"
+        )
+    return result.stdout
+
+
+def _prom_scalar(query: str) -> float:
+    """Evaluate a PromQL query to a single number, or 0.0 when it yields nothing.
+
+    Note the ambiguity this collapses: an unreachable Prometheus and a genuinely-zero series
+    both return 0.0. That is safe *here* only because callers use it to wait for a signal to
+    RISE — a persistent 0 fails the wait, which is the outcome either case deserves.
+    """
     url = f"{PROM_BASE}/api/v1/query?query={urllib.parse.quote(query)}"
     try:
-        with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 — local Prometheus
+        with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 — local
             payload = json.load(response)
         result = payload["data"]["result"]
         return float(result[0]["value"][1]) if result else 0.0
     except (urllib.error.URLError, KeyError, ValueError, IndexError):
         return 0.0
+
+
+def _prom_error_rate(service: str) -> float:
+    return _prom_scalar(
+        f'sum(rate(http_requests_total{{namespace="{NAMESPACE}",'
+        f'pod=~"{service}.*",status="500"}}[2m]))'
+    )
+
+
+def _prom_p99_latency(service: str) -> float:
+    """p99 request duration in seconds, over the same window the agents will query."""
+    return _prom_scalar(
+        f"histogram_quantile(0.99, sum by (le) (rate("
+        f'http_request_duration_seconds_bucket{{namespace="{NAMESPACE}",'
+        f'pod=~"{service}.*"}}[2m])))'
+    )
+
+
+def _prom_restarts(service: str) -> float:
+    return _prom_scalar(
+        f'sum(kube_pod_container_status_restarts_total{{namespace="{NAMESPACE}",'
+        f'pod=~"{service}.*"}})'
+    )
+
+
+def observed_signal(scenario: Scenario) -> tuple[float, str]:
+    """The quantity this scenario's fault should move, and a label for the report.
+
+    Each fault type is verified against the metric an investigator would actually look at.
+    Checking only the error rate — as the first version did — meant latency and pod-crash
+    scenarios were never verified at all: they waited out the timer and alerted whether or
+    not anything had happened.
+    """
+    if scenario.fault == "error":
+        return _prom_error_rate(scenario.service), "5xx/s"
+    if scenario.fault == "latency":
+        return _prom_p99_latency(scenario.service), "p99 s"
+    if scenario.fault == "killpod":
+        return _prom_restarts(scenario.service), "restarts"
+    return 0.0, "none"
+
+
+def signal_threshold(scenario: Scenario) -> float:
+    """How much movement counts as "the fault is live".
+
+    Set well above baseline noise but well below the injected magnitude, so the wait ends as
+    soon as the condition is genuinely observable rather than when it peaks.
+    """
+    if scenario.fault == "error":
+        return 5.0  # 5xx per second; baseline is 0
+    if scenario.fault == "latency":
+        return 0.5  # seconds at p99; healthy is ~0.12
+    if scenario.fault == "killpod":
+        return 1.0  # at least one restart recorded
+    return 0.0
 
 
 def _post_alert(scenario: Scenario, attempt: int, token: str) -> str:
@@ -228,7 +399,11 @@ async def _fetch_outcome(incident_id: str) -> dict:
     async with session_scope() as session:
         incident = await session.get(Incident, incident_id)
         steps = list(
-            (await session.execute(select(AgentStep).where(AgentStep.incident_id == incident_id)))
+            (
+                await session.execute(
+                    select(AgentStep).where(AgentStep.incident_id == incident_id)
+                )
+            )
             .scalars()
             .all()
         )
@@ -256,11 +431,15 @@ async def _fetch_outcome(incident_id: str) -> dict:
             .first()
         )
 
-        rca = [s for s in steps if s.agent_name == "rca" and s.ensemble_pass_index is None]
+        rca = [
+            s for s in steps if s.agent_name == "rca" and s.ensemble_pass_index is None
+        ]
         final_rca = rca[-1] if rca else None
         output = (final_rca.structured_output or {}) if final_rca else {}
         resolution = [s for s in steps if s.agent_name == "resolution"]
-        resolution_output = (resolution[-1].structured_output or {}) if resolution else {}
+        resolution_output = (
+            (resolution[-1].structured_output or {}) if resolution else {}
+        )
 
         return {
             "state": str(incident.state) if incident else "",
@@ -278,7 +457,9 @@ async def _fetch_outcome(incident_id: str) -> dict:
                 }
             ),
             "action": action.action_type if action else "",
-            "alternatives": len(resolution_output.get("alternatives_rejected", []) or []),
+            "alternatives": len(
+                resolution_output.get("alternatives_rejected", []) or []
+            ),
             "tokens": sum(s.tokens_used or 0 for s in steps),
             "cost": sum(s.cost_usd or 0.0 for s in steps),
         }
@@ -290,7 +471,13 @@ async def _await_completion(incident_id: str, deadline: float) -> bool:
     from core.db import session_scope
     from db.models import Incident
 
-    terminal = {"hypothesis_formed", "escalated", "remediation_proposed", "monitoring", "resolved"}
+    terminal = {
+        "hypothesis_formed",
+        "escalated",
+        "remediation_proposed",
+        "monitoring",
+        "resolved",
+    }
     while time.monotonic() < deadline:
         async with session_scope() as session:
             incident = await session.get(Incident, incident_id)
@@ -304,24 +491,37 @@ async def run_scenario(scenario: Scenario, attempt: int, token: str) -> RunOutco
     outcome = RunOutcome(scenario_id=scenario.id, attempt=attempt)
     started = time.monotonic()
     try:
-        if scenario.fault == "killpod":
-            _inject("killpod", scenario.service)
-            await asyncio.sleep(20)
-        else:
-            _inject(scenario.fault, scenario.service, scenario.fault_arg)
-            # Let the metric window fill before alerting, so evidence matches the alert.
-            settle_deadline = time.monotonic() + SIGNAL_SETTLE_SECONDS
-            while time.monotonic() < settle_deadline:
-                if scenario.fault == "error" and _prom_error_rate(scenario.service) >= 5:
-                    break
-                await asyncio.sleep(10)
+        _inject(scenario.fault, scenario.service, scenario.fault_arg)
+
+        # Wait for the fault to become *observable*, not merely applied. The agents query
+        # Prometheus over a rate window; alerting before that window has filled hands them a
+        # service that still looks healthy and makes a correct "unknown" look like a failure.
+        threshold = signal_threshold(scenario)
+        settle_deadline = time.monotonic() + SIGNAL_SETTLE_SECONDS
+        level, unit = observed_signal(scenario)
+        while level < threshold and time.monotonic() < settle_deadline:
+            await asyncio.sleep(10)
+            level, unit = observed_signal(scenario)
+
+        if level < threshold:
+            # Refuse to alert. A benchmark that cannot distinguish "the fault was live" from
+            # "the fault never landed" produces numbers that mean nothing, and the failure
+            # mode is silent: the agents get blamed for the environment.
+            raise HarnessError(
+                f"fault never became observable — {unit} reached {level:.2f}, "
+                f"needed {threshold:.2f} within {SIGNAL_SETTLE_SECONDS}s. Not alerting; "
+                f"this run measures the harness, not the agents."
+            )
+        outcome.signal_at_alert = f"{level:.2f} {unit}"
 
         outcome.incident_id = _post_alert(scenario, attempt, token)
         finished = await _await_completion(
             outcome.incident_id, time.monotonic() + INVESTIGATION_TIMEOUT_SECONDS
         )
         if not finished:
-            outcome.error = "investigation did not reach a terminal state before the timeout"
+            outcome.error = (
+                "investigation did not reach a terminal state before the timeout"
+            )
             return outcome
 
         measured = await _fetch_outcome(outcome.incident_id)
@@ -337,10 +537,23 @@ async def run_scenario(scenario: Scenario, attempt: int, token: str) -> RunOutco
         outcome.alternatives_rejected = measured["alternatives"]
         outcome.tokens = measured["tokens"]
         outcome.cost_usd = measured["cost"]
+    except HarnessError as exc:
+        # Not an AI result. Reported separately so it can never be averaged into quality.
+        outcome.error = str(exc)
+        outcome.harness_error = True
     except Exception as exc:  # noqa: BLE001 — one bad run must not abort the campaign
         outcome.error = f"{type(exc).__name__}: {exc}"
     finally:
-        _inject("clear", scenario.service)
+        # Cleanup must not raise. A failure here would replace whatever the run actually
+        # found with a teardown error, and leaving the fault applied would poison every
+        # subsequent scenario — so it is recorded rather than propagated.
+        try:
+            _inject("clear", scenario.service)
+        except HarnessError as exc:
+            outcome.error = (
+                outcome.error + " | " if outcome.error else ""
+            ) + f"cleanup: {exc}"
+            outcome.harness_error = True
         outcome.wall_seconds = round(time.monotonic() - started, 1)
     return outcome
 
@@ -349,7 +562,12 @@ async def run_scenario(scenario: Scenario, attempt: int, token: str) -> RunOutco
 
 
 def format_report(outcomes: list[RunOutcome]) -> str:
-    lines = ["", "=" * 100, "SCENARIO VALIDATION — consistency across repeated runs", "=" * 100]
+    lines = [
+        "",
+        "=" * 100,
+        "SCENARIO VALIDATION — consistency across repeated runs",
+        "=" * 100,
+    ]
 
     by_scenario: dict[str, list[RunOutcome]] = {}
     for outcome in outcomes:
@@ -357,7 +575,11 @@ def format_report(outcomes: list[RunOutcome]) -> str:
 
     for scenario_id, runs in by_scenario.items():
         scenario = SCENARIOS_BY_ID[scenario_id]
-        lines += ["", f"--- {scenario_id} ({scenario.service}) ---", f"    {scenario.why}"]
+        lines += [
+            "",
+            f"--- {scenario_id} ({scenario.service}) ---",
+            f"    {scenario.why}",
+        ]
         lines.append(
             f"    {'run':>4} {'state':<20} {'category':<22} {'conf':>5} "
             f"{'cites':>6} {'action':<18} {'tok':>7} {'sec':>6}"
@@ -370,15 +592,17 @@ def format_report(outcomes: list[RunOutcome]) -> str:
             lines.append(
                 f"    {run.attempt:>4} {run.final_state:<20} {run.category:<22} {conf:>5} "
                 f"{run.validated_citations}/{run.citations:<4} {run.action_chosen or '-':<18} "
-                f"{run.tokens:>7} {run.wall_seconds:>6.0f}"
+                f"{run.tokens:>7} {run.wall_seconds:>6.0f}  signal={run.signal_at_alert or '-'}"
             )
 
-        clean = [r for r in runs if not r.error]
+        clean = [r for r in runs if not r.error]  # harness failures carry .error too
         if len(clean) > 1:
             categories = {r.category for r in clean}
             confidences = [r.confidence for r in clean if r.confidence is not None]
             approvals = sum(1 for r in clean if r.approved)
-            stability = "STABLE" if len(categories) == 1 else f"VARIES {sorted(categories)}"
+            stability = (
+                "STABLE" if len(categories) == 1 else f"VARIES {sorted(categories)}"
+            )
             lines.append(
                 f"    consistency: category={stability}"
                 f"  approved={approvals}/{len(clean)}"

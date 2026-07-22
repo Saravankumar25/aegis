@@ -347,3 +347,43 @@ def test_note_gap_keeps_an_empty_reason_meaningful():
     store = EvidenceStore()
     store.note_gap("prometheus.query_metrics", "")
     assert store.gaps == ["prometheus.query_metrics: unavailable"]
+
+
+def test_no_module_appends_to_gaps_outside_the_store():
+    """The boundary must be the *only* way a gap is created.
+
+    `note_gap` sanitises, but nothing stops a future producer from doing
+    `store.gaps.append(...)` directly and skipping it — which is exactly how the original
+    bypass looked. Parsing the source is the only check that survives someone who does not
+    know this rule exists; a behavioural test only covers the producers we already wrote.
+    """
+    import ast
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+
+    for path in backend.rglob("*.py"):
+        parts = path.parts
+        if "tests" in parts or ".venv" in parts:
+            continue
+        # EvidenceStore itself is the sanctioned owner of the list.
+        if path.name == "evidence.py" and "agents" in parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover — a broken file fails elsewhere, loudly
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "append":
+                continue
+            target = node.func.value
+            if isinstance(target, ast.Attribute) and target.attr == "gaps":
+                offenders.append(f"{path.relative_to(backend)}:{node.lineno}")
+
+    assert not offenders, (
+        "gap text must go through EvidenceStore.note_gap so it is redacted, defanged and "
+        f"bounded; direct .gaps.append found at: {offenders}"
+    )
