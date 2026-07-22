@@ -358,7 +358,14 @@ def build_graph(services: InvestigationServices):
             state["incident_id"],
             "rca",
             message=message,
-            structured=result.model_dump(exclude={"passes"}),
+            # `cause_identified` is a computed property, so `model_dump` omits it — but it is
+            # the field that tells a reader whether `confidence` refers to a diagnosis or to
+            # a confident refusal. Persisted explicitly so the UI and the audit trail carry
+            # the distinction rather than re-deriving it from a string comparison.
+            structured={
+                **result.model_dump(exclude={"passes"}),
+                "cause_identified": result.cause_identified,
+            },
             confidence=result.confidence,
             model=",".join(result.models_used) or None,
             latency_ms=result.latency_ms,

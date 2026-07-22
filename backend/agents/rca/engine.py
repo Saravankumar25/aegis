@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from agents.evidence import EvidenceStore
 from agents.prompts.library import RCA_HYPOTHESIS
-from agents.rca.scoring import RCAPass, agreement_score, consensus_pass
+from agents.rca.scoring import (
+    UNKNOWN_CATEGORY,
+    RCAPass,
+    agreement_score,
+    consensus_pass,
+)
 from core.config import get_settings
 from db.enums import EvidenceType
 from guardrails import guard_input
@@ -40,6 +45,18 @@ class RCAResult(BaseModel):
     tokens_used: int = 0
     cost_usd: float = 0.0
     budget_degraded: bool = False
+
+    @property
+    def cause_identified(self) -> bool:
+        """Whether a cause was actually named, as opposed to explicitly not determined.
+
+        `confidence` describes certainty in whatever conclusion was reached, and "unknown"
+        is a conclusion. That makes `confidence` alone unsafe to gate on: `unknown` at 0.95
+        means "confident this evidence identifies nothing", which reads identically to a
+        confident diagnosis if you only look at the number. Anything that decides to *act*
+        must require `cause_identified` as well.
+        """
+        return self.root_cause_category != UNKNOWN_CATEGORY
 
 
 _SCHEMA_HINT = (

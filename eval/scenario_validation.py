@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -76,6 +77,11 @@ class Scenario:
     why: str
 
 
+# Order matters. `pod-crash` deliberately restarts pods, and those restart events stay
+# inside the agents' k8s event window for minutes afterwards — long enough to be read as
+# current instability by the NEXT scenario on the same service. Observed: dependency-failure
+# ran straight after pod-crash on payment-service and reasoned about the previous
+# scenario's restarts. Destructive scenarios therefore run last.
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         id="error-spike",
@@ -104,17 +110,6 @@ SCENARIOS: tuple[Scenario, ...] = (
         why="Latency rises with a flat error rate — the discriminator against an error spike.",
     ),
     Scenario(
-        id="pod-crash",
-        service="payment-service",
-        fault="killpod",
-        fault_arg="",
-        alert_kind="pod_crash",
-        alert_title="Payment service pod restarting",
-        alert_value=1.0,
-        expected_category="resource_exhaustion",
-        why="Restart/unavailability signal with no error-rate change in the application.",
-    ),
-    Scenario(
         id="dependency-failure",
         service="payment-service",
         fault="error",
@@ -127,6 +122,17 @@ SCENARIOS: tuple[Scenario, ...] = (
             "Fault at the dependency rather than the service customers notice. Tests whether "
             "the agent follows the call graph or blames the alerting service."
         ),
+    ),
+    Scenario(
+        id="pod-crash",
+        service="payment-service",
+        fault="killpod",
+        fault_arg="",
+        alert_kind="pod_crash",
+        alert_title="Payment service pod restarting",
+        alert_value=1.0,
+        expected_category="resource_exhaustion",
+        why="Restart/unavailability signal with no error-rate change in the application.",
     ),
 )
 
@@ -320,11 +326,38 @@ def _prom_p99_latency(service: str) -> float:
     )
 
 
-def _prom_restarts(service: str) -> float:
-    return _prom_scalar(
-        f'sum(kube_pod_container_status_restarts_total{{namespace="{NAMESPACE}",'
-        f'pod=~"{service}.*"}})'
+def _fresh_pod_count(service: str, within_seconds: int = 180) -> float:
+    """How many of a service's pods were created recently.
+
+    NOT `kube_pod_container_status_restarts_total`. That counter tracks container restarts
+    *within* a pod, and `killpod` deletes the pod outright — the replacement is a new object
+    starting at zero, so the restart metric stays flat and the fault looks like it never
+    happened. Measured: checkout and catalog showed 2 restarts each while the freshly-killed
+    payment pods showed 0.
+    """
+    result = _kubectl(
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        f"app={service}",
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.creationTimestamp}{'\\n'}{end}",
     )
+    now = datetime.datetime.now(datetime.UTC)
+    fresh = 0
+    for line in result.stdout.splitlines():
+        stamp = line.strip()
+        if not stamp:
+            continue
+        try:
+            created = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if (now - created).total_seconds() <= within_seconds:
+            fresh += 1
+    return float(fresh)
 
 
 def observed_signal(scenario: Scenario) -> tuple[float, str]:
@@ -340,7 +373,7 @@ def observed_signal(scenario: Scenario) -> tuple[float, str]:
     if scenario.fault == "latency":
         return _prom_p99_latency(scenario.service), "p99 s"
     if scenario.fault == "killpod":
-        return _prom_restarts(scenario.service), "restarts"
+        return _fresh_pod_count(scenario.service), "fresh pods"
     return 0.0, "none"
 
 
@@ -487,10 +520,36 @@ async def _await_completion(incident_id: str, deadline: float) -> bool:
     return False
 
 
+BASELINE_TIMEOUT_SECONDS = 180
+
+
+async def _wait_for_clean_baseline(scenario: Scenario) -> None:
+    """Block until the target service shows no residual fault from a previous run.
+
+    Without this, back-to-back runs measure each other. A scenario that begins while the
+    previous one's errors are still inside the agents' rate window hands them two overlapping
+    faults and no way to tell which the alert refers to — and the resulting confusion is then
+    recorded as an agent failure.
+    """
+    if scenario.fault == "killpod":
+        return  # restart counters do not decay; ordering handles this scenario instead
+
+    deadline = time.monotonic() + BASELINE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if _prom_error_rate(scenario.service) < 1.0:
+            return
+        await asyncio.sleep(10)
+    raise HarnessError(
+        f"{scenario.service} never returned to a clean baseline within "
+        f"{BASELINE_TIMEOUT_SECONDS}s; a run starting here would measure the previous fault"
+    )
+
+
 async def run_scenario(scenario: Scenario, attempt: int, token: str) -> RunOutcome:
     outcome = RunOutcome(scenario_id=scenario.id, attempt=attempt)
     started = time.monotonic()
     try:
+        await _wait_for_clean_baseline(scenario)
         _inject(scenario.fault, scenario.service, scenario.fault_arg)
 
         # Wait for the fault to become *observable*, not merely applied. The agents query

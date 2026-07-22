@@ -74,6 +74,10 @@ log = logging.getLogger("meridian")
 # tail full of successes would bury the failures an investigator needs to see.
 SUCCESS_LOG_SAMPLE = float(os.environ.get("SUCCESS_LOG_SAMPLE", "0.02"))
 
+# Nominal connection-pool size, quoted in slow-request logs so a latency incident
+# carries a plausible saturation mechanism rather than a bare duration.
+_POOL_SIZE = int(os.environ.get("POOL_SIZE", "20"))
+
 # The dependency each service blames when it fails, so a multi-service incident has a direction
 # for Correlation to follow rather than three services all reporting unrelated errors.
 _UPSTREAM = {
@@ -136,11 +140,25 @@ def _simulate_one(endpoint: str) -> None:
     if status == "500":
         _log_error(endpoint, request_id, latency)
     elif affected and _state.mode == "latency":
+        # Names a *mechanism*, not just "this was slow". The error path already does this
+        # (upstream timeout + pool exhaustion) and it is what lets RCA reach a cause rather
+        # than restating the symptom. Without it, a latency incident presented evidence that
+        # something was slow and nothing about why, and RCA correctly answered "unknown" —
+        # measured across four runs. An investigation target that is genuinely undiagnosable
+        # tests the refusal path, not the reasoning path.
+        upstream = _UPSTREAM.get(SERVICE_NAME)
+        where = f"upstream={upstream} " if upstream else ""
         log.warning(
-            "request_id=%s GET %s -> 200 slow_request duration=%dms threshold=500ms",
+            "request_id=%s GET %s -> 200 slow_request duration=%dms threshold=500ms %s"
+            "cause=query_latency: db pool wait %dms, active=%d/%d connections, "
+            "slow query p99 exceeded",
             request_id,
             endpoint,
             int(latency * 1000),
+            where,
+            int(latency * 700),
+            _POOL_SIZE - 1,
+            _POOL_SIZE,
         )
     elif random.random() < SUCCESS_LOG_SAMPLE:
         log.info(

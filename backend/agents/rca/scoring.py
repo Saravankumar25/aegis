@@ -12,6 +12,8 @@ from itertools import combinations
 
 from pydantic import BaseModel, Field
 
+UNKNOWN_CATEGORY = "unknown"
+
 
 class RCAPass(BaseModel):
     """Parsed output of one ensemble pass."""
@@ -20,6 +22,19 @@ class RCAPass(BaseModel):
     hypothesis: str
     confidence: float = Field(ge=0.0, le=1.0)
     claims: list[dict] = Field(default_factory=list)
+
+    @property
+    def cause_identified(self) -> bool:
+        """Whether this pass actually named a cause.
+
+        `confidence` qualifies whichever conclusion was reached, and those conclusions are
+        not the same kind of thing: "0.9 that a connection pool is exhausted" and "0.9 that
+        this evidence cannot identify anything" share a field but not a meaning. Any
+        consumer that acts on confidence must check this first — otherwise a future gate of
+        the form `confidence > 0.9` fires on an incident the agent explicitly could not
+        explain, which is the single most dangerous reading of this number.
+        """
+        return self.root_cause_category != UNKNOWN_CATEGORY
 
     @property
     def cited_ids(self) -> set[str]:
