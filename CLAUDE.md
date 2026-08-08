@@ -831,3 +831,70 @@ Each entry must include:
   monitoring, alerting or log shipping — nothing reports that the app died. **No LLM keys are
   configured on either host**, so the deployed instances serve the API but no agent can
   actually reason there; the deployment is verified as infrastructure, not as AI behaviour.
+
+### 2026-08-08 — Entry 19: Runtime credentials, backups, monitoring; TLS blocked (V3b)
+- **The deployment could not authenticate anyone or reason about anything, and both were
+  invisible.** Entry 18 shipped a system that served pages, ran migrations and passed every
+  health check while having no Firebase service account and no LLM key. `/health` checks
+  Postgres and Redis; it does not check whether the process can do its job. New convention:
+  **a health check that only probes dependencies is not evidence the system works** — the
+  first request that needs a credential is.
+- **Credentials now come from AWS Secrets Manager**, fetched onto the host by
+  `scripts/fetch-secrets.sh` immediately before each deploy using the instance profile, so
+  rotating a key is a redeploy rather than an ssh edit. The IAM grant names two secret ARNs,
+  not `*`.
+- **New convention — a secrets fetch MERGES into the env file, never rewrites it.** The
+  database password, JWT secret and ingest webhook token are generated on the host by
+  `bootstrap-ec2.sh` and exist nowhere else. A fetch that replaced the file would destroy the
+  credentials the running database and every issued session depend on, and the damage would
+  only appear at the next restart.
+- **New convention — a secret is piped on stdin, never passed as an argument.** Every argv is
+  world-readable through `ps` for the lifetime of the process. The fetched JSON is also
+  validated before use, because a truncated or error-shaped response would otherwise be
+  written happily and surface much later as an opaque auth failure.
+- **The bug worth remembering: two credential paths, two readers, two different users.**
+  `--env-file` is parsed by the docker CLI in the *deploy user's* process, so `app.env` must
+  belong to ec2-user; the mounted secrets directory is read by the application *inside* the
+  container, which runs as the image's unprivileged uid 10001. Owning both as ec2-user left
+  the container unable to traverse a 0700 directory it did not own — and the container still
+  started, reported healthy and passed its health check, because nothing touches the key until
+  the first sign-in. Chowned numerically now, which concedes nothing since docker-group
+  membership is already root-equivalent.
+- **The dashboard came within one default of being handed the Firebase private key.**
+  `deploy.sh` grew a `SECRETS_DIR` mount whose default path exists on every host, so the
+  browser-facing container would have received it silently. Both dashboard deploys now pass a
+  non-existent `SECRETS_DIR`, alongside the existing non-existent `ENV_FILE`. New convention:
+  **a new opt-in mount needs an explicit opt-out at every existing call site in the same
+  change**, because a default that is usually right is exactly the kind that goes unreviewed.
+- **SAFETY-RELEVANT (CLAUDE.md §15):** `AEGIS_ADMIN_EMAILS` and `AEGIS_APPROVER_EMAILS` are now
+  populated on both hosts. That allowlist is the only thing between "any Google account can
+  sign in" and approving a cluster-write remediation. It is set per host and deliberately not
+  committed; `bootstrap-ec2.sh` parameterises it and defaults it empty, so no repository file
+  names the approvers.
+- **Backups (#2):** AWS Data Lifecycle Manager takes a daily snapshot of both instances at
+  19:30 UTC with 7-day retention, selected by a `Backup=aegis` tag. This is instance-level, so
+  the recovery story is "restore a volume", and RPO is up to 24 hours. **No restore has been
+  rehearsed**, which means the backups are unproven, not proven.
+- **Monitoring (#3):** SNS topics in ap-south-1 and us-east-1, CloudWatch alarms for CPU>80%
+  and EC2 status-check failure per instance, and Route 53 health checks on `/health` for both
+  environments with alarms on failure. Route 53 publishes only to us-east-1, which is why the
+  topic exists twice. **Alerts do not flow until the emailed SNS subscription is confirmed.**
+  Memory and disk are not covered — those need the CloudWatch agent installed on each host.
+- **TLS (#1) is BLOCKED, not done.** CloudFront was the chosen route (managed certificate, no
+  domain required) and the account cannot create distributions: *"Your account must be verified
+  before you can add new CloudFront resources. Please contact AWS Support."* That is an
+  account-level restriction no amount of configuration works around. Both hosts therefore still
+  serve plain HTTP, session cookies still cross the internet in clear text, and the `Secure`
+  cookie flag still cannot be set. Issue #1 stays open.
+- **Verified live, not just in tests:** a forged ID token returns `unauthorized: invalid or
+  expired sign-in` on both hosts (Firebase Admin initialised and rejected it — previously a
+  500), and a real `complete()` from inside the production container answered on
+  `gemini-3.1-flash-lite` in 777ms with LangSmith tracing active. 5 Gemini keys, 4 OpenRouter
+  keys and the Firebase project id are all resolved inside the container.
+- **Still open, explicitly not claimed:** TLS (#1, blocked above). The SNS email subscription is
+  unconfirmed, so nothing is actually paged yet. No restore has been tested. Memory/disk metrics
+  and log shipping are absent. Postgres remains a container on the app host — the snapshots
+  protect the volume, they do not make the database highly available. **No end-to-end
+  investigation has been run against the deployed system**: the LLM path is proven by a single
+  direct provider call, not by an alert producing an observer-validated hypothesis, and the MCP
+  evidence sources still point at a local kind cluster that does not exist from EC2.
