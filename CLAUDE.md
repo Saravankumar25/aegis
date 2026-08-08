@@ -2,11 +2,14 @@
 
 This file is the permanent operating guide for any AI agent (Claude Code or otherwise) working on this repository. Read it before starting any session. It is a living document: it is updated after every feature, not just at the start of the project.
 
-**Current phase:** **V3a — deployed.** Aegis runs on AWS (ECR + two EC2 hosts, ap-south-1) behind a
-staging→production pipeline with a human approval gate; **496 backend tests** pass, 3 skipped; ruff
-clean; frontend typecheck and build clean. Read Entry 18 first — it lists what the deployment does
-**not** yet have (no TLS, no backups, no monitoring, no LLM keys on the hosts). The phase history
-below is kept for context and its per-entry test counts are historical, not current.
+**Current phase:** **V3c — deployed, dashboard on HTTPS, not yet investigating.** Aegis runs on AWS
+(ECR + two EC2 hosts, ap-south-1) behind a staging→production pipeline with a human approval gate,
+with the dashboard on Vercel over HTTPS proxying `/api/v1/*` to the production API. **Read Entry 20
+first, then 19 and 18** — together they list what the deployment does **not** have. The two that
+matter most: **no worker process is deployed**, so an ingested alert is accepted and then sits at
+`open` forever and no agent ever reasons on EC2; and the **Vercel→EC2 hop is still plaintext**, so
+TLS is narrowed but not closed. Test counts in the entries below are historical, not current — the
+last measured figure is **496 backend tests** pass, 3 skipped (Entry 18).
 
 MVP and V1.5 are complete and verified end-to-end against the live kind cluster (Entries 5 and 6). V2a added Firebase/Google auth and made Redis load-bearing (Entry 8). V2b migrated to a dedicated Firebase project and built real semantic embeddings + a production RAG pipeline (Entry 9). V2c audited the **AI layer** — which turned out to be one real LLM agent out of seven — and began replacing simulated intelligence with genuine reasoning: versioned prompts, enforced structured outputs, streaming, a guardrails layer, LLM Triage (clamped), LLM Communication, and an LLM Observer critique running alongside the deterministic validator (Entry 10). **244 backend tests** pass; ruff clean.
 
@@ -898,3 +901,64 @@ Each entry must include:
   investigation has been run against the deployed system**: the LLM path is proven by a single
   direct provider call, not by an alert producing an observer-validated hypothesis, and the MCP
   evidence sources still point at a local kind cluster that does not exist from EC2.
+
+### 2026-08-08 — Entry 20: HTTPS dashboard on Vercel, and the deploy that had been failing silently (V3c)
+- **Every Vercel deployment since Entry 18's last commit had failed, and the site looked fine.**
+  `vercel.json` (added by `8979ecd`) carried `rootDirectory`, which is not a `vercel.json`
+  property — the root directory is a *project* setting. Vercel rejects the file during schema
+  validation, before the build starts, so the deployment errored with **no build logs at all**
+  and the alias kept serving `c2948c6`, the last commit from before the file existed. The
+  dashboard therefore looked live and current while being three commits stale, and pushing to
+  main changed nothing. Removed rather than repaired: the build logs of the next deployment show
+  `npm ci` running inside `frontend/`, which proves the project's root directory was already set
+  correctly and none of the file's three settings were doing anything.
+- **New convention — a deployment that fails before its build emits no log stream, so read the
+  deployment's `errorMessage`, not the logs.** Every log query returned "No build log events
+  found", which reads exactly like a permissions or retention problem. The single line naming
+  the cause was on the deployment object. A build log is evidence about a build that started.
+- **The dashboard could not have authenticated, and CORS was never the reason.** The plan for
+  this work was a CORS widening. But session auth rides on httpOnly cookies flagged `Secure` +
+  `SameSite=Strict` (ESD §8, `api/security.py`), and between an HTTPS page and a plain-HTTP API
+  on another address **three** things fail independently: a `Secure` cookie delivered over http
+  is discarded by the browser, `SameSite=Strict` withholds it on a cross-site request, and the
+  fetch is killed as active mixed content *before* CORS is evaluated. Widening CORS addresses
+  none of them. `/api/v1/*` is now proxied through the dashboard's own origin
+  (`frontend/next.config.ts`), which makes every call same-origin and relaxes no cookie flag.
+  ESD §25 gained the trade-off row.
+- **New convention — `docker restart` does not re-read `--env-file`.** The env is captured when
+  the container is *created*; a restart replays the old values. Editing `app.env` and restarting
+  reported success on both hosts and changed nothing — visible only because the preflight kept
+  returning `Disallowed CORS origin` for the new origin while still allowing the old one, which
+  is precisely the shape of a config that did not load. An env change requires recreating the
+  container, which is what `deploy.sh` does.
+- **A `NEXT_PUBLIC_*` value that cannot work was being honoured silently.** `NEXT_PUBLIC_API_BASE`
+  was set on Vercel to `http://13.203.209.44`, and the env var wins over origin resolution, so
+  the built bundle addressed the API directly — every call dying as blocked mixed content while
+  the deployment built, served and health-checked normally. `resolveApiBase()` now refuses an
+  `http://` base on an HTTPS page, falls through to the same-origin path, and warns. Entry 18
+  kept this value out of the *image* for good reasons; this is the other half — a value that is
+  merely wrong for the environment must not be obeyed into a page that dies on first fetch.
+- **The worker is not deployed anywhere, so nothing is ever investigated.** The image's `CMD` is
+  `uvicorn api.main:app` and nothing else; both hosts run `aegis`, `aegis-web`, `aegis-postgres`
+  and `aegis-redis`, and no worker process. A real alert ingested into production with the live
+  webhook token was accepted (`201`, severity `P1`, state `open`) and **stayed `open`** — it is
+  the only row in the production `incidents` table. Entry 19 recorded that no end-to-end
+  investigation had been *run*; the sharper statement is that none can be, because the process
+  that claims incidents does not exist in the deployment.
+- **Verified live, not just in tests:** `https://aegis-nine-alpha.vercel.app/api/v1/health`
+  returns the EC2 API's own `{"status":"ok","checks":{"postgres":"ok","redis":"ok"}}` through the
+  proxy, and an unauthenticated `/api/v1/incidents` through it returns the API's real
+  `{"error_code":"unauthorized"}` envelope with `401` — so the browser-facing path reaches the
+  backend and its auth still refuses. Ingestion rejects a missing webhook token with `401` and
+  accepts the real one with `201`. Both hosts' preflights now answer
+  `access-control-allow-origin: https://aegis-nine-alpha.vercel.app` after container recreation.
+  Frontend typecheck and build clean against a worktree of committed state.
+- **Still open, explicitly not claimed:** **Google sign-in has not been exercised in a browser** —
+  the proxy removes the three mechanical blockers, but no human has completed the OAuth popup, so
+  the login flow is unproven end to end. The **Vercel→EC2 hop is still plaintext**, so TLS (#1)
+  is narrowed, not closed: session cookies no longer cross the internet in clear text between
+  browser and edge, but request bodies still do between edge and origin. **No worker is
+  deployed**, so agent reasoning remains unproven on EC2 for the reason above, and the MCP
+  evidence sources still point at a local kind cluster that does not exist from EC2. Untracked
+  work in `frontend/app/docs/` fails `next build` on an unclosed MDX brace; it is uncommitted, so
+  it does not affect deployments, but it does break a local frontend build.
