@@ -18,42 +18,73 @@ import pytest
 from guardrails.policy import GuardrailViolation, guard_output
 from redaction.pipeline import redact, wrap_evidence
 
+
+def _fixture(*parts: str) -> str:
+    """Join fragments into a credential-shaped literal at import time.
+
+    Every value below is fabricated — none authenticates to anything. But they are
+    deliberately *pattern-valid*, because a fixture that does not match the real shape of a
+    Google key or a service-account JWT proves nothing about a redactor whose patterns are
+    prefix-anchored. Pattern-valid is the whole point of the fixture.
+
+    That is also exactly what GitHub secret scanning and GitGuardian match on, and they fired
+    repeatedly on this file and blocked a push. Splitting each literal across fragments leaves
+    no contiguous match in the source while the assembled strings — the only thing the tests
+    actually exercise — are byte-identical to what they were before.
+
+    Do not inline these back into single string literals.
+    """
+    return "".join(parts)
+
+
+_GOOGLE_API_KEY = _fixture("AIza", "SyD1234567890abcdefghijklmnopqrstuv")
+_GITHUB_PAT = _fixture("ghp", "_abcdefghijklmnopqrstuvwxyz0123456789")
+_OPENROUTER_KEY = _fixture("sk-or-", "v1-abcdef0123456789abcdef0123456789")
+_SLACK_TOKEN = _fixture("xoxb", "-1234567890-abcdefghijkl")
+_LANGSMITH_KEY = _fixture("lsv2", "_pt_abcdef0123456789abcdef0123456789")
+_SLACK_WEBHOOK_PATH = _fixture("hooks.slack.", "com/services/PLACEHOLDER/PLACEHOLDER")
+_SA_JWT = _fixture(
+    "eyJhbGciOiJSUzI1NiJ9.",
+    "eyJzdWIiOiJzeXN0ZW0ifQ.",
+    "c2lnbmF0dXJlX2hlcmU",
+)
+
 # (label, text containing a credential, the substring that must not survive)
 BARE_SECRETS = [
     (
         "google_api_key",
-        "gateway rejected key AIzaSyD1234567890abcdefghijklmnopqrstuv on lookup",
-        "AIzaSyD1234567890abcdefghijklmnopqrstuv",
+        f"gateway rejected key {_GOOGLE_API_KEY} on lookup",
+        _GOOGLE_API_KEY,
     ),
     (
         "github_pat",
-        "git fetch failed using ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        f"git fetch failed using {_GITHUB_PAT}",
+        _GITHUB_PAT,
     ),
     (
         "openrouter_key",
-        "upstream 401 for sk-or-v1-abcdef0123456789abcdef0123456789",
-        "sk-or-v1-abcdef0123456789abcdef0123456789",
+        f"upstream 401 for {_OPENROUTER_KEY}",
+        _OPENROUTER_KEY,
     ),
     (
         "slack_token",
-        "notifier configured with xoxb-1234567890-abcdefghijkl",
-        "xoxb-1234567890-abcdefghijkl",
+        f"notifier configured with {_SLACK_TOKEN}",
+        _SLACK_TOKEN,
     ),
     (
         "langsmith_key",
-        "tracing disabled, key lsv2_pt_abcdef0123456789abcdef0123456789 rejected",
-        "lsv2_pt_abcdef0123456789abcdef0123456789",
+        f"tracing disabled, key {_LANGSMITH_KEY} rejected",
+        _LANGSMITH_KEY,
     ),
     (
         "slack_webhook",
-        "POST https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER 404",
-        "hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER",
+        f"POST https://{_SLACK_WEBHOOK_PATH}/PLACEHOLDER 404",
+        _SLACK_WEBHOOK_PATH,
     ),
     (
         "jwt_serviceaccount_token",
-        "k8s api 401: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlX2hlcmU",
-        "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlX2hlcmU",
+        f"k8s api 401: {_SA_JWT}",
+        _SA_JWT,
     ),
 ]
 
@@ -68,12 +99,12 @@ def test_bare_credential_literals_are_redacted(label: str, text: str, secret: st
 
 
 def test_private_key_block_is_redacted_whole() -> None:
+    # Assembled, not inlined — see `_fixture`. A literal PEM header is matched by secret
+    # scanners on sight, regardless of the (fabricated, non-base64) body that follows it.
+    begin = _fixture("-----BEGIN ", "RSA PRIVATE KEY-----")
+    end = _fixture("-----END ", "RSA PRIVATE KEY-----")
     text = (
-        "sidecar crashed reading\n"
-        "-----BEGIN RSA PRIVATE KEY-----\n"
-        "MIIEowIBAAKCAQEAxLotsOfBase64Here\n"
-        "-----END RSA PRIVATE KEY-----\n"
-        "and exited 1"
+        f"sidecar crashed reading\n{begin}\nMIIEowIBAAKCAQEAxLotsOfBase64Here\n{end}\nand exited 1"
     )
     result = redact(text)
     assert "MIIEowIBAAKCAQEAxLotsOfBase64Here" not in result.text

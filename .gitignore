@@ -64,3 +64,7 @@ firebase-details.txt
 
 # Locally cached embedding / reranker ONNX models (fetched on first use, never committed)
 .model-cache/
+
+# AWS IAM access-key export (CLAUDE.md §12 — never committed)
+aegis_accessKeys.csv
+*_accessKeys.csv

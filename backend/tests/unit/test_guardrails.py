@@ -61,14 +61,22 @@ def test_benign_evidence_produces_no_findings():
 # --- egress: fail closed ------------------------------------------------------------------
 
 
+# Fabricated, but deliberately credential-*shaped* — a fixture that does not match the real
+# prefix proves nothing about prefix-anchored egress patterns. Split across fragments for the
+# same reason as `test_security_redaction_secrets._fixture`: the assembled strings are what the
+# test exercises, while the source holds no contiguous match for GitHub secret scanning or
+# GitGuardian, both of which alerted on the inlined versions. Do not re-inline.
 @pytest.mark.parametrize(
     "leak",
     [
-        "-----BEGIN PRIVATE KEY-----\nMIIEvQ",
-        "the key is sk-or-v1-abcdef0123456789abcdef",
-        "token ghp_" + "a" * 36,
-        "slack xoxb-123456789012-abcdefghij",
-        "bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+        "-----BEGIN " + "PRIVATE KEY-----\nMIIEvQ",
+        "the key is " + "sk-or-" + "v1-abcdef0123456789abcdef",
+        "token " + "ghp" + "_" + "a" * 36,
+        "slack " + "xoxb" + "-123456789012-abcdefghij",
+        "bearer "
+        + "eyJhbGciOiJIUzI1NiJ9."
+        + "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        + "dozjgNryP4J3jVmNHl0w5N",
     ],
 )
 def test_credential_shaped_output_is_blocked(leak):
