@@ -49,9 +49,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
             text=summary,
         )
     else:
-        store.note_gap(
-            "k8s.list_pods", pods_result.get("error") or "unavailable"
-        )
+        store.note_gap("k8s.list_pods", pods_result.get("error") or "unavailable")
 
     if service_pods:
         pod_name = service_pods[0]["name"]
@@ -66,9 +64,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
                 text=logs["text"] or "(empty log)",
             )
         else:
-            store.note_gap(
-                "k8s.get_pod_logs", logs_result.get("error") or "unavailable"
-            )
+            store.note_gap("k8s.get_pod_logs", logs_result.get("error") or "unavailable")
 
     events_result = await gateway.call("k8s", "list_events", {})
     if (events := _data(events_result)) is not None:
@@ -87,9 +83,7 @@ async def collect_evidence(gateway: Any, service_name: str) -> tuple[EvidenceSto
                 ),
             )
     else:
-        store.note_gap(
-            "k8s.list_events", events_result.get("error") or "unavailable"
-        )
+        store.note_gap("k8s.list_events", events_result.get("error") or "unavailable")
 
     # --- prometheus: error rate + latency for the service's pods ---
     error_q = (
