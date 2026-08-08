@@ -23,6 +23,15 @@ function resolveApiBase(): string {
     return "http://localhost:8000/api/v1";
   }
   const { protocol, hostname } = window.location;
+  // An HTTPS page cannot address the plain-HTTP API directly: the fetch is blocked as active
+  // mixed content, and the `Secure` + `SameSite=Strict` session cookies would not survive the
+  // cross-site hop even if it were. Stay on this origin and let the `next.config.ts` rewrite
+  // forward to the API — a relative base keeps the request same-origin, so no cookie flag has
+  // to be relaxed. Plain HTTP keeps addressing the API host directly, which is how a
+  // dashboard container talks to the backend on its own EC2 host.
+  if (protocol === "https:") {
+    return "/api/v1";
+  }
   return `${protocol}//${hostname}:${DEFAULT_API_PORT}/api/v1`;
 }
 
