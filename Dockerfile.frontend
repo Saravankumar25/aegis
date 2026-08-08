@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1
+
+# Next.js dashboard (ESD §5). Built and shipped separately from the API image: the two have
+# different runtimes (Node vs Python) and different failure modes, and a dashboard crash must
+# not be able to take the incident-response API with it.
+
+# ---------- stage 1: build ----------
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+# Dependencies first, so a source-only change does not re-resolve the tree.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+
+# Firebase Web SDK configuration is substituted into the client bundle by `next build`, so it
+# has to be present here rather than at run time. These identify the Firebase project and are
+# public by design — they ship to every browser that loads the app. The security boundary is
+# the backend's verification of the resulting ID token (ESD §8), never the secrecy of these
+# fields; the service-account key, which IS secret, lives only in the backend image's env.
+#
+# NEXT_PUBLIC_API_BASE is deliberately NOT set: lib/api.ts derives it from window.location at
+# run time so this one image is valid on both staging and production.
+ARG NEXT_PUBLIC_FIREBASE_API_KEY
+ARG NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+ARG NEXT_PUBLIC_FIREBASE_PROJECT_ID
+ARG NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+ARG NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+ARG NEXT_PUBLIC_FIREBASE_APP_ID
+ENV NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
+    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN \
+    NEXT_PUBLIC_FIREBASE_PROJECT_ID=$NEXT_PUBLIC_FIREBASE_PROJECT_ID \
+    NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=$NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET \
+    NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID \
+    NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID \
+    NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build
+
+# ---------- stage 2: runtime ----------
+FROM node:20-slim AS runtime
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 aegis
+
+WORKDIR /app
+
+# The standalone output already contains the pruned node_modules and the server entrypoint.
+# `static` is copied separately because Next deliberately leaves it out of standalone.
+# There is no `public/` directory in this project, so it is not copied — adding an
+# unconditional COPY for it would fail the build the moment it is absent.
+COPY --from=builder --chown=aegis:aegis /app/.next/standalone ./
+COPY --from=builder --chown=aegis:aegis /app/.next/static ./.next/static
+
+USER aegis
+
+EXPOSE 3000
+
+# Hits the app's own root rather than a dedicated endpoint: for a rendered dashboard, "the
+# page renders" is the property worth checking, and a 200 here means the server, the build
+# output and the static assets all resolved.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:3000/ || exit 1
+
+CMD ["node", "server.js"]

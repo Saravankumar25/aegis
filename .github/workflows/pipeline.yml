@@ -20,6 +20,7 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: aegis
+  ECR_REPOSITORY_WEB: aegis-web
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -84,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.uri }}
+      image-web: ${{ steps.image.outputs.uri-web }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,14 +96,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Create ECR repository if not exists
+      - name: Create ECR repositories if not exists
         run: |
-          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" \
-            || aws ecr create-repository \
-                 --repository-name "$ECR_REPOSITORY" \
-                 --region "$AWS_REGION" \
-                 --image-scanning-configuration scanOnPush=true \
-                 --image-tag-mutability MUTABLE
+          for repo in "$ECR_REPOSITORY" "$ECR_REPOSITORY_WEB"; do
+            aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" \
+              || aws ecr create-repository \
+                   --repository-name "$repo" \
+                   --region "$AWS_REGION" \
+                   --image-scanning-configuration scanOnPush=true \
+                   --image-tag-mutability MUTABLE
+          done
 
       - name: Login to ECR
         id: ecr
@@ -116,6 +120,7 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           echo "uri=${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "uri-web=${REGISTRY}/${ECR_REPOSITORY_WEB}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
@@ -130,6 +135,32 @@ jobs:
           tags: |
             ${{ steps.image.outputs.uri }}
             ${{ steps.image.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.frontend
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.uri-web }}
+            ${{ steps.image.outputs.registry }}/${{ env.ECR_REPOSITORY_WEB }}:latest
+          # Firebase Web SDK config is substituted into the client bundle at build time, so it
+          # cannot be supplied at run time. These are repository VARIABLES, not secrets: they
+          # identify the Firebase project and ship to every browser that loads the app. The
+          # security boundary is the backend verifying the resulting ID token (ESD §8).
+          # Passing them as secrets would also re-break job outputs, exactly as AWS_ACCOUNT_ID
+          # did.
+          build-args: |
+            NEXT_PUBLIC_FIREBASE_API_KEY=${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY }}
+            NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
+            NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+            NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
+            NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
+            NEXT_PUBLIC_FIREBASE_APP_ID=${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -187,6 +218,17 @@ jobs:
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
 
+      # ENV_FILE points at a path that does not exist, so deploy.sh skips --env-file. This is
+      # deliberate: the dashboard is a browser-facing renderer and needs no database URL, JWT
+      # secret or webhook token. Handing it app.env would put every backend credential into a
+      # second container's environment for no benefit.
+      - name: Deploy dashboard (staging)
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
+            "IMAGE='${{ needs.docker.outputs.image-web }}' AWS_REGION='${{ vars.AWS_REGION }}' \
+             CONTAINER_NAME=aegis-web HOST_PORT=3000 CONTAINER_PORT=3000 \
+             ENV_FILE=/etc/aegis/web.env bash ~/aegis/deploy.sh"
+
   deploy-production:
     name: deploy-production
     needs: [docker, deploy-staging]
@@ -214,3 +256,11 @@ jobs:
             "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
+
+      # See the staging job: the dashboard deliberately gets no env file.
+      - name: Deploy dashboard (production)
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" \
+            "IMAGE='${{ needs.docker.outputs.image-web }}' AWS_REGION='${{ vars.AWS_REGION }}' \
+             CONTAINER_NAME=aegis-web HOST_PORT=3000 CONTAINER_PORT=3000 \
+             ENV_FILE=/etc/aegis/web.env bash ~/aegis/deploy.sh"

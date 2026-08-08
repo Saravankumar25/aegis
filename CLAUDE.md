@@ -2,7 +2,13 @@
 
 This file is the permanent operating guide for any AI agent (Claude Code or otherwise) working on this repository. Read it before starting any session. It is a living document: it is updated after every feature, not just at the start of the project.
 
-**Current phase:** **V2e.** MVP and V1.5 are complete and verified end-to-end against the live kind cluster (Entries 5 and 6). V2a added Firebase/Google auth and made Redis load-bearing (Entry 8). V2b migrated to a dedicated Firebase project and built real semantic embeddings + a production RAG pipeline (Entry 9). V2c audited the **AI layer** — which turned out to be one real LLM agent out of seven — and began replacing simulated intelligence with genuine reasoning: versioned prompts, enforced structured outputs, streaming, a guardrails layer, LLM Triage (clamped), LLM Communication, and an LLM Observer critique running alongside the deterministic validator (Entry 10). **244 backend tests** pass; ruff clean.
+**Current phase:** **V3a — deployed.** Aegis runs on AWS (ECR + two EC2 hosts, ap-south-1) behind a
+staging→production pipeline with a human approval gate; **496 backend tests** pass, 3 skipped; ruff
+clean; frontend typecheck and build clean. Read Entry 18 first — it lists what the deployment does
+**not** yet have (no TLS, no backups, no monitoring, no LLM keys on the hosts). The phase history
+below is kept for context and its per-entry test counts are historical, not current.
+
+MVP and V1.5 are complete and verified end-to-end against the live kind cluster (Entries 5 and 6). V2a added Firebase/Google auth and made Redis load-bearing (Entry 8). V2b migrated to a dedicated Firebase project and built real semantic embeddings + a production RAG pipeline (Entry 9). V2c audited the **AI layer** — which turned out to be one real LLM agent out of seven — and began replacing simulated intelligence with genuine reasoning: versioned prompts, enforced structured outputs, streaming, a guardrails layer, LLM Triage (clamped), LLM Communication, and an LLM Observer critique running alongside the deterministic validator (Entry 10). **244 backend tests** pass; ruff clean.
 
 V2d made Correlation a real LLM tool-calling loop and replaced static routing with an LLM supervisor over a genuine graph cycle; every LLM call site now uses the prompt registry, guardrails and `prompt_ref`, enforced structurally in CI (Entry 11). V2e added LangSmith tracing and a deterministic RAG quality gate that runs in CI, plus a wired-but-unexecuted RAGAS harness (Entry 12). **274 backend tests** pass; ruff clean.
 
@@ -740,3 +746,88 @@ Each entry must include:
   on confidence. Full-suite state was not verifiable in isolation: four unrelated tests
   (`test_security_rate_limit_scope` ×2, `test_worker_reliability`, `test_rag_retrieval`) were
   failing from other agents' concurrent in-flight work and import nothing changed here.
+
+### 2026-08-08 — Entry 18: First real deployment — AWS ECR + EC2, staging→production gate (V3a)
+- **The repo's own status line was wrong again, and the suite proved it.** CLAUDE.md claimed
+  274 tests passing; CI failed on three counts, none of them a behaviour regression. `mcp>=1.2`
+  was unbounded, so CI resolved a 2.x that no longer ships `mcp.server.fastmcp` — which every
+  server in `mcp_servers/` is built on — while local venvs sat on 1.28.1 and passed. Pinned
+  `<2`. The lesson is the same one as Entry 13: **an unbounded dependency range means the build
+  can break on someone else's release rather than on a commit**, and it will break in CI first,
+  where nobody is looking at a diff.
+- **A test that only passed where an optional extra happened to be installed.**
+  `evaluate_generation()` checked for `ragas` before validating its own arguments, so a
+  mismatched `answers`/`cases` count — a caller bug that silently scores every case against the
+  wrong question — raised on a developer machine and degraded to a quiet `available=False` in
+  CI. Argument validation now runs first, unconditionally. New convention: **an argument check
+  belongs ahead of every environmental check**, because a caller bug is a caller bug in all
+  environments.
+- **New convention — production is a mode the process enforces, not a label it wears.**
+  `Settings` now refuses to construct when `ENVIRONMENT` is production and any permissive local
+  default survives. The one that mattered: `webhook_guard` skips its check entirely when
+  `INGEST_WEBHOOK_TOKEN` is unset, so on a public address that was not a weaker guard on the
+  only unauthenticated write path Aegis exposes — it was **no guard**, and an accepted alert
+  spends LLM budget and can raise a remediation proposal. Same class of silence for the
+  placeholder `JWT_SECRET` (anyone who can read the repo could mint an approver's session
+  cookie) and `CORS_ORIGINS=*` against `allow_credentials=True`. It raises rather than warns: a
+  startup warning is read once, by whoever watched the deploy. Staging is deliberately exempt so
+  rehearsing a deploy never pressures anyone into reusing production secrets somewhere less
+  protected. **Verified live**: prod serves `/docs` as 404 and staging as 200; both 401 an
+  unauthenticated ingest POST that would previously have returned 200 and created an incident.
+- **Secret scanners fired on fabricated fixtures, and weakening the fixtures was the wrong
+  fix.** GitHub push protection and GitGuardian alerted on the credential literals in
+  `test_security_redaction_secrets.py` and `test_guardrails.py`. Every value is invented, but
+  they are correctly *pattern-valid*, because a fixture that does not match the real prefix
+  proves nothing about a redactor and an egress guard whose patterns are prefix-anchored. New
+  convention: **keep the shape, drop the literal** — each credential is joined from fragments at
+  import time, so the assembled strings are byte-identical and no contiguous match remains in
+  source. Also gitignored `aegis_accessKeys.csv`, a real AWS IAM key export sitting untracked in
+  the repo root, one `git add .` from being committed.
+- **A secret that was not a secret broke the deploy.** `docker.outputs.image` was assembled from
+  `secrets.AWS_ACCOUNT_ID`, and GitHub refuses to pass a job output containing a registered
+  secret — it drops it and annotates the run "Skip output 'image' since it may contain secret".
+  Every downstream job therefore ran with `IMAGE=''`. New convention: **an account id and a
+  region are repository variables, never secrets.** Neither is confidential (an account id is in
+  every ARN), and registering them as secrets buys nothing while silently corrupting job
+  outputs. `migrate.sh` failing loudly on the empty value is the only reason this surfaced as a
+  clean error instead of a deploy of something unintended — which is the argument for the
+  `${VAR:?message}` style throughout those scripts.
+- **The spec for this work omitted the one thing that makes it run.** `deploy.sh` authenticates
+  to ECR *on the EC2 host*, so the instances need an instance profile granting ECR pull. Created
+  `aegis-ec2-ecr-role` + `aegis-ec2-profile`; without it every deploy fails at `docker pull`
+  with no hint that the cause is IAM.
+- **`--env-file` is read by the docker CLI, not the daemon.** A root-owned `0600`
+  `/etc/aegis/app.env` failed every deploy with `permission denied` even though dockerd runs as
+  root, because the client parses the file in the calling user's own process first. Owned by the
+  deploy user now, which concedes nothing — docker group membership is already root-equivalent.
+- **The dashboard was compiling in CI and deploying nowhere.** `npm run build` ran in the
+  `build` job purely as a compile check while the image copied `backend/` only, so the deployed
+  system had no UI at all and `/` returned 404. Now built as a separate image
+  (`Dockerfile.frontend`, standalone output, non-root) into its own ECR repo and run as a second
+  container. Kept separate from the API image deliberately: different runtimes, different
+  failure modes, and a dashboard crash must not be able to take incident response with it.
+- **New convention — a `NEXT_PUBLIC_*` value that differs per environment must not be baked
+  in.** `NEXT_PUBLIC_API_BASE` is substituted at `next build` time, so compiling it in would
+  have forced a separate image per environment and destroyed the property that makes the
+  staging gate meaningful: that the artifact promoted to production is the exact one verified on
+  staging. `lib/api.ts` now derives the API base from `window.location` at run time, so one
+  image is valid everywhere. The Firebase Web SDK values stay build-time because they are
+  identical across environments, and they are repository *variables* — they ship to every
+  browser by design, and the security boundary is the backend verifying the ID token (ESD §8).
+- **Infrastructure is now reproducible.** `scripts/bootstrap-ec2.sh` captures Docker, Postgres
+  (pgvector), Redis and `app.env` generation, including both fixes above, and is idempotent so a
+  partial failure can be re-run. Secrets are generated on the host and never transmitted.
+- **Verified live, not just in tests:** full pipeline `test → build → docker → migrate-staging
+  → deploy-staging → [human approval] → deploy-production`, both environments serving
+  `/health` with `postgres: ok, redis: ok` on the identical image SHA, production approved by a
+  required reviewer. **496 backend tests pass, 3 skipped**; ruff clean; frontend typecheck and
+  build clean.
+- **Still open, explicitly not claimed:** **no TLS** — both hosts serve plain HTTP on :80, so
+  the httpOnly session cookies the project treats as non-negotiable cross the internet in
+  clear text, which is the single largest remaining gap. SSH stays open to `0.0.0.0/0` because
+  GitHub-hosted runners have dynamic IPs (an explicit operator decision, not an oversight; a
+  self-hosted runner or SSM would close it). Postgres is a container on the app host with no
+  backups and no HA, so losing an instance loses the audit log and incident history. No
+  monitoring, alerting or log shipping — nothing reports that the app died. **No LLM keys are
+  configured on either host**, so the deployed instances serve the API but no agent can
+  actually reason there; the deployment is verified as infrastructure, not as AI behaviour.

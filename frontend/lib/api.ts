@@ -1,8 +1,32 @@
 // API client helpers. Auth rides on httpOnly cookies (ESD §5/§8): every request is
 // credentialed and the frontend never reads or stores a token.
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api/v1";
+// Resolved in the browser rather than baked in at build time.
+//
+// `NEXT_PUBLIC_*` values are substituted by `next build`, so an API base compiled into the
+// bundle would make the image environment-specific: staging and production would need
+// separate builds, and the artifact promoted to production would no longer be the exact one
+// that was verified on staging. Deriving it from `window.location` keeps a single image
+// valid everywhere, because each deployment's dashboard talks to the API on its own host.
+//
+// The explicit env var still wins where it is set, which is how local development points a
+// dev server at a backend on a different port.
+const DEFAULT_API_PORT = "80";
+
+function resolveApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_BASE) {
+    return process.env.NEXT_PUBLIC_API_BASE;
+  }
+  // Server-side render and build-time evaluation have no `window`; the value is only ever
+  // used by fetch/EventSource in the browser, so this branch just needs to be inert.
+  if (typeof window === "undefined") {
+    return "http://localhost:8000/api/v1";
+  }
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:${DEFAULT_API_PORT}/api/v1`;
+}
+
+export const API_BASE = resolveApiBase();
 
 export class ApiError extends Error {
   constructor(
