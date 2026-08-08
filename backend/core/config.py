@@ -8,8 +8,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The shipped placeholder. Named so the production guard below can recognise it by identity
+# rather than by a substring someone might reword in `.env.example` and silently defeat.
+INSECURE_JWT_DEFAULT = "change-me-generate-a-long-random-string"
+PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod"})
 
 
 class Settings(BaseSettings):
@@ -46,7 +51,7 @@ class Settings(BaseSettings):
     # --- Auth (self-issued JWT in httpOnly cookies, ESD §8) ---
     # Firebase supplies *identity* only; Aegis still issues and owns the session, so the
     # browser's durable credential stays an httpOnly cookie (CLAUDE.md §12).
-    jwt_secret: str = Field(default="change-me-generate-a-long-random-string")
+    jwt_secret: str = Field(default=INSECURE_JWT_DEFAULT)
     jwt_access_ttl_seconds: int = Field(default=900)
     jwt_refresh_ttl_seconds: int = Field(default=604800)
 
@@ -270,6 +275,58 @@ class Settings(BaseSettings):
 
     # Runtime environment marker; "test" disables some production-only guards.
     environment: str = Field(default="local")
+
+    @model_validator(mode="after")
+    def _refuse_insecure_production_start(self) -> Settings:
+        """Fail closed on settings that are fine locally and dangerous on a public address.
+
+        Every value below has a permissive default *on purpose*, because the documented local
+        target is a trusted kind cluster on a laptop (ESD §18) where demanding a webhook token
+        and a generated JWT secret would be friction with no threat to answer. The danger is
+        that those same defaults are silent: nothing about a running instance distinguishes
+        "no ingestion token configured" from "ingestion is authenticated", and the failure is
+        only visible once someone else's alert has already been accepted.
+
+        So the check is bound to ``ENVIRONMENT``, and it raises rather than warns. A warning at
+        startup is read once, by whoever happened to be watching the deploy; refusing to boot
+        is read by everyone, immediately. This runs in the API and the worker alike because it
+        lives on the settings object rather than in the app factory — a worker with a forgeable
+        JWT secret is no safer than an API with one.
+        """
+        if self.environment.strip().lower() not in PRODUCTION_ENVIRONMENTS:
+            return self
+
+        problems: list[str] = []
+        if self.jwt_secret == INSECURE_JWT_DEFAULT:
+            problems.append(
+                "JWT_SECRET is still the placeholder published in .env.example, so anyone "
+                "who can read the repository can mint a valid session cookie for any user"
+            )
+        elif len(self.jwt_secret) < 32:
+            problems.append(
+                f"JWT_SECRET is {len(self.jwt_secret)} characters; use at least 32 so the "
+                "signing key is not brute-forceable"
+            )
+        if not self.ingest_webhook_token:
+            problems.append(
+                "INGEST_WEBHOOK_TOKEN is unset, so the ingestion webhook accepts alerts from "
+                "anyone who can reach the port — and an accepted alert spends LLM budget and "
+                "can raise a remediation proposal"
+            )
+        if any(origin.strip() == "*" for origin in self.cors_origins.split(",")):
+            problems.append(
+                "CORS_ORIGINS contains '*' while credentialed requests are enabled, which "
+                "would let any origin read authenticated responses"
+            )
+        if "change-me" in self.database_url:
+            problems.append("DATABASE_URL still carries the example password")
+
+        if problems:
+            raise ValueError(
+                "refusing to start with ENVIRONMENT="
+                f"{self.environment!r}:\n  - " + "\n  - ".join(problems)
+            )
+        return self
 
 
 @lru_cache
