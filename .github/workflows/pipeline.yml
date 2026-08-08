@@ -12,8 +12,13 @@ concurrency:
 permissions:
   contents: read
 
+# Region and account id are repository VARIABLES, not secrets. Neither is confidential — the
+# account id appears in every ARN and in the ECR registry hostname — and registering them as
+# secrets actively broke the pipeline: GitHub refuses to pass a job output containing a secret
+# value, so `docker.outputs.image` was silently delivered downstream as an empty string and
+# the deploy ran with `IMAGE=''` ("Skip output 'image' since it may contain secret").
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: aegis
   IMAGE_TAG: ${{ github.sha }}
 
@@ -87,7 +92,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Create ECR repository if not exists
         run: |
@@ -104,8 +109,12 @@ jobs:
 
       - name: Resolve image URI
         id: image
+        env:
+          # The registry the login step actually authenticated against, rather than a string
+          # reassembled from an account id — one source of truth, and it cannot disagree with
+          # the credentials in use.
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           echo "uri=${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
 
@@ -148,7 +157,7 @@ jobs:
       - name: Run database migrations (staging)
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
-            "chmod +x ~/aegis/migrate.sh && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh"
+            "chmod +x ~/aegis/migrate.sh && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh"
 
   deploy-staging:
     name: deploy-staging
@@ -175,8 +184,8 @@ jobs:
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
             "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
-             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh \
-             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
 
   deploy-production:
     name: deploy-production
@@ -203,5 +212,5 @@ jobs:
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" \
             "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
-             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh \
-             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
