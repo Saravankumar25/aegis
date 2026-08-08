@@ -182,7 +182,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.EC2_STAGING_HOST }}" >> ~/.ssh/known_hosts
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" 'mkdir -p ~/aegis'
-          scp scripts/migrate.sh scripts/deploy.sh \
+          scp scripts/migrate.sh scripts/deploy.sh scripts/fetch-secrets.sh \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}:~/aegis/"
 
       - name: Run database migrations (staging)
@@ -208,26 +208,28 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.EC2_STAGING_HOST }}" >> ~/.ssh/known_hosts
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" 'mkdir -p ~/aegis'
-          scp scripts/migrate.sh scripts/deploy.sh \
+          scp scripts/migrate.sh scripts/deploy.sh scripts/fetch-secrets.sh \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}:~/aegis/"
 
       - name: Migrate and deploy (staging)
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
-            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
+            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh ~/aegis/fetch-secrets.sh \
+             && sudo AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/fetch-secrets.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
 
-      # ENV_FILE points at a path that does not exist, so deploy.sh skips --env-file. This is
-      # deliberate: the dashboard is a browser-facing renderer and needs no database URL, JWT
-      # secret or webhook token. Handing it app.env would put every backend credential into a
-      # second container's environment for no benefit.
+      # Two deliberate opt-outs, both about keeping credentials out of a browser-facing process:
+      #   ENV_FILE   -> a path that does not exist, so deploy.sh skips --env-file. The dashboard
+      #                 renders pages; it needs no database URL, JWT secret or webhook token.
+      #   SECRETS_DIR-> likewise, so the Firebase Admin *private key* is never mounted into it.
+      #                 Without this the default path exists and would be mounted silently.
       - name: Deploy dashboard (staging)
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
             "IMAGE='${{ needs.docker.outputs.image-web }}' AWS_REGION='${{ vars.AWS_REGION }}' \
              CONTAINER_NAME=aegis-web HOST_PORT=3000 CONTAINER_PORT=3000 \
-             ENV_FILE=/etc/aegis/web.env bash ~/aegis/deploy.sh"
+             ENV_FILE=/etc/aegis/web.env SECRETS_DIR=/etc/aegis/no-secrets bash ~/aegis/deploy.sh"
 
   deploy-production:
     name: deploy-production
@@ -247,20 +249,22 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.EC2_PROD_HOST }}" >> ~/.ssh/known_hosts
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" 'mkdir -p ~/aegis'
-          scp scripts/migrate.sh scripts/deploy.sh \
+          scp scripts/migrate.sh scripts/deploy.sh scripts/fetch-secrets.sh \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}:~/aegis/"
 
       - name: Migrate and deploy (production)
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" \
-            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
+            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh ~/aegis/fetch-secrets.sh \
+             && sudo AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/fetch-secrets.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' bash ~/aegis/migrate.sh \
              && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ vars.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
 
-      # See the staging job: the dashboard deliberately gets no env file.
+      # See the staging job: the dashboard deliberately gets neither the env file nor the
+      # mounted Firebase private key.
       - name: Deploy dashboard (production)
         run: |
           ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" \
             "IMAGE='${{ needs.docker.outputs.image-web }}' AWS_REGION='${{ vars.AWS_REGION }}' \
              CONTAINER_NAME=aegis-web HOST_PORT=3000 CONTAINER_PORT=3000 \
-             ENV_FILE=/etc/aegis/web.env bash ~/aegis/deploy.sh"
+             ENV_FILE=/etc/aegis/web.env SECRETS_DIR=/etc/aegis/no-secrets bash ~/aegis/deploy.sh"

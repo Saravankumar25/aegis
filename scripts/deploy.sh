@@ -9,6 +9,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-aegis}"
 HOST_PORT="${HOST_PORT:-80}"
 CONTAINER_PORT="${CONTAINER_PORT:-3000}"
 ENV_FILE="${ENV_FILE:-/etc/aegis/app.env}"
+SECRETS_DIR="${SECRETS_DIR:-/etc/aegis/secrets}"
 
 REGISTRY="${IMAGE%%/*}"
 
@@ -38,6 +39,16 @@ RUN_ARGS=(
 if [ -f "${ENV_FILE}" ]; then
   log "using env file ${ENV_FILE}"
   RUN_ARGS+=(--env-file "${ENV_FILE}")
+fi
+
+# Credential *files* (currently the Firebase Admin service account) are mounted read-only
+# rather than inlined into the env file: firebase-admin wants a path, and a multi-line PEM
+# inside an env file is a reliable source of parsing bugs. Mounted only when the directory
+# exists, so the dashboard container — which is given neither an env file nor secrets — is
+# unaffected.
+if [ -d "${SECRETS_DIR}" ]; then
+  log "mounting ${SECRETS_DIR} read-only at /run/secrets"
+  RUN_ARGS+=(--volume "${SECRETS_DIR}:/run/secrets:ro")
 fi
 
 log "starting ${CONTAINER_NAME} from ${IMAGE}"

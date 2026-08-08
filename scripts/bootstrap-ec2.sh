@@ -17,6 +17,15 @@ set -Eeuo pipefail
 
 ENVIRONMENT="${ENVIRONMENT:?ENVIRONMENT is required (staging|production)}"
 APP_USER="${APP_USER:-ec2-user}"
+# Firebase supplies identity; this id is the token's required audience, so it is a security
+# control and not a label (ESD §8). Auth refuses to initialise without it.
+FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-}"
+# Role allowlists, evaluated on every sign-in. Any authenticated account absent from both is
+# provisioned `viewer` and cannot approve a remediation — the deliberate fail-closed default
+# (CLAUDE.md §12). Left empty here so an operator states who the approvers are, rather than
+# a repository file naming them.
+AEGIS_ADMIN_EMAILS="${AEGIS_ADMIN_EMAILS:-}"
+AEGIS_APPROVER_EMAILS="${AEGIS_APPROVER_EMAILS:-}"
 ENV_FILE="${ENV_FILE:-/etc/aegis/app.env}"
 # Docker's default bridge gateway. The app runs in a bridge-networked container and the data
 # stores publish to the host, so the gateway address reaches them from either network mode —
@@ -95,6 +104,9 @@ DATABASE_URL=postgresql+asyncpg://aegis:${PGPASS}@${GW}:5432/aegis
 REDIS_URL=redis://${GW}:6379/0
 JWT_SECRET=$(openssl rand -hex 32)
 INGEST_WEBHOOK_TOKEN=$(openssl rand -hex 24)
+FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+AEGIS_ADMIN_EMAILS=${AEGIS_ADMIN_EMAILS}
+AEGIS_APPROVER_EMAILS=${AEGIS_APPROVER_EMAILS}
 CORS_ORIGINS=http://$(curl -fsS --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4 || echo localhost):3000
 ENV
 else
