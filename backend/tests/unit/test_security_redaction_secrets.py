@@ -47,8 +47,8 @@ BARE_SECRETS = [
     ),
     (
         "slack_webhook",
-        "POST https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX 404",
-        "hooks.slack.com/services/T00000000/B00000000",
+        "POST https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER 404",
+        "hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER",
     ),
     (
         "jwt_serviceaccount_token",
