@@ -14,8 +14,25 @@
 const DEFAULT_API_PORT = "80";
 
 function resolveApiBase(): string {
-  if (process.env.NEXT_PUBLIC_API_BASE) {
-    return process.env.NEXT_PUBLIC_API_BASE;
+  const configured = process.env.NEXT_PUBLIC_API_BASE;
+  if (configured) {
+    // An `http://` base is not merely a weaker choice on an HTTPS page — the browser blocks
+    // the request as active mixed content, so every call fails before it leaves the tab. That
+    // is invisible from the server side: the deployment builds, serves and health-checks
+    // normally while the dashboard cannot load a single incident. Refuse the value and fall
+    // through to the same-origin path rather than ship a page that dies on first fetch, and
+    // say so in the console so the misconfiguration is discoverable instead of merely silent.
+    const insecureOnSecurePage =
+      typeof window !== "undefined" &&
+      window.location.protocol === "https:" &&
+      configured.startsWith("http://");
+    if (!insecureOnSecurePage) {
+      return configured;
+    }
+    console.warn(
+      `Ignoring NEXT_PUBLIC_API_BASE=${configured}: an https page cannot call an http API ` +
+        `(mixed content). Falling back to the same-origin proxy. Unset it to silence this.`,
+    );
   }
   // Server-side render and build-time evaluation have no `window`; the value is only ever
   // used by fetch/EventSource in the browser, so this branch just needs to be inert.
