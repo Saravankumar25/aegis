@@ -81,17 +81,35 @@ def test_build_dataset_shapes_records_for_ragas():
 
 async def test_no_judge_degrades_without_raising():
     """A caller that forgets to configure a judge gets a legible reason, not a crash — and
-    not a score, which would be indistinguishable from a real measurement."""
+    not a score, which would be indistinguishable from a real measurement.
+
+    The invariant asserted unconditionally is the one that matters: no score, no exception.
+    Which *reason* is reported depends on the environment — CI installs the runtime deps only,
+    so it legitimately stops at "ragas not installed" before it can reach the judge check.
+    Asserting the judge wording unconditionally made this test pass only on a machine that
+    happened to have the optional extra.
+    """
     report = await evaluate_generation(CASES, answers=["a", "b"], judge_llm=None)
     assert report.available is False
-    assert "judge" in report.reason.lower()
     assert report.scores == {}
+    assert report.reason  # never silently blank — absence must always be legible
+
+    ok, _ = ragas_available()
+    if ok:
+        assert "judge" in report.reason.lower()
+    else:
+        assert "ragas" in report.reason.lower()
 
 
 async def test_mismatched_answer_count_raises_rather_than_misattributing():
-    """One answer short would silently score every later case against the wrong question."""
+    """One answer short would silently score every later case against the wrong question.
+
+    Asserted with no judge configured, which is the environment CI actually runs in: the
+    argument check has to fire before any optional-dependency or judge check, or a caller bug
+    degrades into a quiet `available=False` instead of an error.
+    """
     with pytest.raises(ValueError, match="answers"):
-        await evaluate_generation(CASES, answers=["only one"], judge_llm=object())
+        await evaluate_generation(CASES, answers=["only one"], judge_llm=None)
 
 
 def test_report_summary_when_unavailable_names_the_reason():

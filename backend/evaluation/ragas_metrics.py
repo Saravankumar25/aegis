@@ -89,6 +89,16 @@ async def evaluate_generation(
     it, that one metric is skipped rather than the whole run failing — faithfulness and
     context precision need only the judge LLM.
     """
+    # Checked first, before anything environmental. A mismatched answer count is a caller
+    # bug, not a missing dependency, so it must raise identically whether or not the optional
+    # extra happens to be installed — otherwise the misattribution this guards against is
+    # caught on a developer machine and silently tolerated in CI.
+    if len(answers) != len(cases):
+        raise ValueError(
+            f"got {len(answers)} answers for {len(cases)} cases — they must correspond, "
+            f"or every score is attributed to the wrong case"
+        )
+
     ok, reason = ragas_available()
     if not ok:
         _log.info("ragas_unavailable", reason=reason)
@@ -102,12 +112,6 @@ async def evaluate_generation(
                 "relevancy; set one explicitly rather than defaulting, so evaluation cost is "
                 "never incurred by accident."
             ),
-        )
-
-    if len(answers) != len(cases):
-        raise ValueError(
-            f"got {len(answers)} answers for {len(cases)} cases — they must correspond, "
-            f"or every score is attributed to the wrong case"
         )
 
     try:

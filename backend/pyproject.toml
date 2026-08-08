@@ -26,7 +26,11 @@ dependencies = [
     "firebase-admin>=6.5",
     "langgraph>=0.2",
     "langchain-core>=0.2",
-    "mcp>=1.2",
+    # Upper-bounded deliberately. Every MCP server in `mcp_servers/` is built on
+    # `mcp.server.fastmcp`, which does not exist in the 2.x line — an unbounded range let CI
+    # resolve a major it cannot import while local venvs stayed on 1.x, so the build broke on
+    # a dependency release rather than on a commit.
+    "mcp>=1.2,<2",
     # Local ONNX embedding + reranking (ESD §20). Chosen over sentence-transformers to avoid
     # a ~2.5GB torch dependency for the same BGE model quality.
     "fastembed>=0.8",
