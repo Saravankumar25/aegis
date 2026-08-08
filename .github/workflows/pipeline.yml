@@ -1,0 +1,207 @@
+name: pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: aegis
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        working-directory: backend
+        run: ruff check .
+
+      - name: Run tests
+        working-directory: backend
+        run: pytest tests/unit tests/contract tests/eval -q
+
+  build:
+    name: build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Build backend package
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist .
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  docker:
+    name: docker
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create ECR repository if not exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" \
+            || aws ecr create-repository \
+                 --repository-name "$ECR_REPOSITORY" \
+                 --region "$AWS_REGION" \
+                 --image-scanning-configuration scanOnPush=true \
+                 --image-tag-mutability MUTABLE
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image URI
+        id: image
+        run: |
+          REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "uri=${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.uri }}
+            ${{ steps.image.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  migrate-staging:
+    name: migrate-staging
+    needs: docker
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_KEY }}
+
+      - name: Copy scripts to staging host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.EC2_STAGING_HOST }}" >> ~/.ssh/known_hosts
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" 'mkdir -p ~/aegis'
+          scp scripts/migrate.sh scripts/deploy.sh \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}:~/aegis/"
+
+      - name: Run database migrations (staging)
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
+            "chmod +x ~/aegis/migrate.sh && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh"
+
+  deploy-staging:
+    name: deploy-staging
+    needs: [docker, migrate-staging]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_KEY }}
+
+      - name: Copy scripts to staging host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.EC2_STAGING_HOST }}" >> ~/.ssh/known_hosts
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" 'mkdir -p ~/aegis'
+          scp scripts/migrate.sh scripts/deploy.sh \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}:~/aegis/"
+
+      - name: Migrate and deploy (staging)
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_STAGING_HOST }}" \
+            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
+
+  deploy-production:
+    name: deploy-production
+    needs: [docker, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_KEY }}
+
+      - name: Copy scripts to production host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.EC2_PROD_HOST }}" >> ~/.ssh/known_hosts
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" 'mkdir -p ~/aegis'
+          scp scripts/migrate.sh scripts/deploy.sh \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}:~/aegis/"
+
+      - name: Migrate and deploy (production)
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_PROD_HOST }}" \
+            "chmod +x ~/aegis/migrate.sh ~/aegis/deploy.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' bash ~/aegis/migrate.sh \
+             && IMAGE='${{ needs.docker.outputs.image }}' AWS_REGION='${{ secrets.AWS_REGION }}' CONTAINER_NAME=aegis HOST_PORT=80 CONTAINER_PORT=3000 bash ~/aegis/deploy.sh"
