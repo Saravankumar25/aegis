@@ -75,7 +75,24 @@ PY
 
 printf '%s' "${LLM_JSON}" | python3 "${MERGE_PY}" "${ENV_FILE}"
 
-chown -R "$(stat -c '%U:%G' "${ENV_FILE}")" "${SECRETS_DIR}" 2>/dev/null || true
-chmod 600 "${SECRETS_DIR}/firebase-service-account.json" "${ENV_FILE}"
+# Two different readers, so two different owners — this is not incidental.
+#
+#   app.env       is read by the docker CLI in the *deploy user's* process before the daemon is
+#                 contacted, so it must be readable by ec2-user.
+#   SECRETS_DIR   is read by the application *inside* the container, which runs as the
+#                 unprivileged uid baked into the image (10001), not as ec2-user.
+#
+# Getting this wrong is silent at deploy time and only fails on the first request that needs
+# the credential: the container started healthy, and `POST /auth/session` returned a 500 with
+# `PermissionError: /run/secrets/firebase-service-account.json` behind it.
+#
+# Numeric ownership is used because uid 10001 has no passwd entry on the host. Nothing is
+# conceded by taking it away from ec2-user, which is in the docker group and therefore already
+# root-equivalent on this box.
+APP_UID="${APP_UID:-10001}"
+chown -R "${APP_UID}:${APP_UID}" "${SECRETS_DIR}"
+chmod 700 "${SECRETS_DIR}"
+chmod 600 "${SECRETS_DIR}/firebase-service-account.json"
+chmod 600 "${ENV_FILE}"
 
 log "runtime secrets in place"
