@@ -282,6 +282,9 @@ class HorizonState(Mutable):
     pending_action_id: str | None = None
     brain_source: Source = Source.SCRIPTED
     tokens: TokenStats = Field(default_factory=TokenStats)
+    # Usage only. Budget maxima come from frozen Settings on every start/resume
+    # and are deliberately absent from the checkpoint.
+    budget_usage: dict[str, int | float] = Field(default_factory=dict)
     escalation_reason: str | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None

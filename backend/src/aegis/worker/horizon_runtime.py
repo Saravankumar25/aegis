@@ -46,7 +46,7 @@ class HorizonRuntime:
     # lifecycle                                                           #
     # ------------------------------------------------------------------ #
 
-    async def start(self) -> None:
+    async def start(self, *, start_background_loops: bool = True) -> None:
         c = self._container
         self._bus = self._build_bus()
 
@@ -64,6 +64,9 @@ class HorizonRuntime:
                 await asyncio.wait_for(c.rawtree_tools.refresh(), timeout=15.0)
             except Exception as exc:  # noqa: BLE001
                 log.warning("rawtree agent tools unavailable", error=str(exc))
+
+        if not start_background_loops:
+            return
 
         try:
             from aegis.telemetry.rawtree import Heartbeat, MetricsForwarder
@@ -154,9 +157,7 @@ class HorizonRuntime:
         return await self.orchestrator().run(incident_id)
 
     async def resume(self, incident_id: str, action_id: str, approved: bool) -> Any:
-        return await self.orchestrator().resume_after_approval(
-            incident_id, action_id, approved
-        )
+        return await self.orchestrator().resume_after_approval(incident_id, action_id, approved)
 
     async def owns_action(self, incident_id: str, action_id: str) -> bool:
         """Whether this approval belongs to a horizon run parked on it."""
@@ -174,7 +175,11 @@ class HorizonRuntime:
     async def _on_anomaly(self, anomaly: Any) -> None:
         from aegis.telemetry.rawtree import open_incident_from_anomaly
 
-        incident_id = await open_incident_from_anomaly(self._container.db, anomaly)
+        incident_id = await open_incident_from_anomaly(
+            self._container.db,
+            anomaly,
+            dispatch_destination=self._settings.workflow_dispatch_backend,
+        )
         if incident_id is None or self._bus is None:
             return
         from aegis.domain.horizon import (
@@ -193,8 +198,7 @@ class HorizonRuntime:
                 event_type=HorizonEventType.HEARTBEAT_ANOMALY,
                 source=anomaly.source,
                 message=(
-                    f"{anomaly.service} {anomaly.metric}={anomaly.value:.3g} "
-                    f"(z={anomaly.z:.1f})"
+                    f"{anomaly.service} {anomaly.metric}={anomaly.value:.3g} (z={anomaly.z:.1f})"
                 ),
                 payload={
                     "service": anomaly.service,

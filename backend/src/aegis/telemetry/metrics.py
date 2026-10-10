@@ -156,8 +156,7 @@ approvals_requested = Counter(
 
 approvals_decided = Counter(
     "aegis_approvals_decided_total",
-    "Human approval decisions. 'expired' is never recorded as 'rejected' - "
-    "nobody rejected it.",
+    "Human approval decisions. 'expired' is never recorded as 'rejected' - nobody rejected it.",
     ["decision"],  # approved | rejected | more_evidence | expired
     registry=REGISTRY,
 )
@@ -204,10 +203,16 @@ queue_depth = Gauge(
     registry=REGISTRY,
 )
 
+workflow_dispatches = Counter(
+    "aegis_workflow_dispatches_total",
+    "Durable workflow dispatch attempts by destination and outcome.",
+    ["destination", "outcome"],  # dispatched | retrying | failed
+    registry=REGISTRY,
+)
+
 circuit_breaker_open = Gauge(
     "aegis_circuit_breaker_open",
-    "1 when a dependency's breaker is open and Aegis is deliberately not "
-    "calling it.",
+    "1 when a dependency's breaker is open and Aegis is deliberately not calling it.",
     ["dependency"],
     registry=REGISTRY,
 )
@@ -234,9 +239,7 @@ def observe_breakers(states: dict[str, str]) -> None:
     signal, and the scrape is the only moment the value is read anyway.
     """
     for dependency, state in states.items():
-        circuit_breaker_open.labels(dependency=dependency).set(
-            1.0 if state == "open" else 0.0
-        )
+        circuit_breaker_open.labels(dependency=dependency).set(1.0 if state == "open" else 0.0)
 
 
 def observe_posture(*, autonomy: bool, kill_switch: bool, audit_failures: int) -> None:
@@ -288,4 +291,5 @@ __all__ = [
     "safe",
     "tool_calls",
     "verifications",
+    "workflow_dispatches",
 ]

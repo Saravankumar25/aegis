@@ -155,6 +155,21 @@ class BudgetGuard:
     def charge_tool(self) -> None:
         self._tool_calls += 1
 
+    def restore_usage(self, usage: dict[str, Any], *, elapsed_s: float | None = None) -> None:
+        """Restore counters only; configured maxima are never deserialised.
+
+        A checkpoint is working state, not authority. Even a malformed or stale
+        checkpoint can only consume more of the configured budget, never raise
+        a cap owned by the supervisor.
+        """
+        self._llm_calls = max(0, int(usage.get("llm_calls", 0)))
+        self._tool_calls = max(0, int(usage.get("tool_calls", 0)))
+        self._tokens = max(0, int(usage.get("tokens", 0)))
+        elapsed = max(0.0, float(usage.get("elapsed_s", 0.0)))
+        if elapsed_s is not None:
+            elapsed = max(elapsed, max(0.0, elapsed_s))
+        self._started = self.clock.monotonic() - elapsed
+
     def snapshot(self) -> dict[str, Any]:
         """Persisted with the incident so budget use is auditable per run."""
         return {
@@ -162,8 +177,4 @@ class BudgetGuard:
             "tool_calls": self._tool_calls,
             "tokens": self._tokens,
             "elapsed_s": round(self.elapsed, 2),
-            "max_wall_seconds": self.max_wall_seconds,
-            "max_llm_calls": self.max_llm_calls,
-            "max_tool_calls": self.max_tool_calls,
-            "max_tokens": self.max_tokens,
         }

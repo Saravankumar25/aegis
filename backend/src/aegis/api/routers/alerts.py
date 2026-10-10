@@ -72,7 +72,7 @@ async def ingest_alert(
 
     cid = getattr(request.state, "correlation_id", correlation_id())
     db = request.app.state.db
-    jobs = JobQueue(db)
+    jobs = JobQueue(db, settings.workflow_dispatch_backend)
 
     async with db.transaction() as conn:
         # Dedup first. A repeated alert must attach, never create.

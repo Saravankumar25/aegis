@@ -24,7 +24,7 @@ class Environment(StrEnum):
 
 
 class AutonomyMode(StrEnum):
-    OFF = "off"          # observe only; no write action of any tier
+    OFF = "off"  # observe only; no write action of any tier
     GUARDED = "guarded"  # tier-1 allowlist only, all 8 gates enforced
     STANDARD = "standard"
 
@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     postgres_pool_min: Positive = 2
     postgres_pool_max: Positive = 16
     postgres_statement_timeout_ms: Positive = 15_000
+
+    # --- durable workflow dispatch ---
+    # Postgres preserves today's worker path. Step Functions is opt-in until
+    # the scale-to-zero environment is created and validated in later phases.
+    workflow_dispatch_backend: Literal["postgres", "step_functions"] = "postgres"
+    step_functions_state_machine_arn: str = ""
+    workflow_dispatch_timeout_s: float = Field(default=10.0, gt=0, le=60)
+    workflow_dispatch_attempts: Annotated[int, Field(ge=1, le=5)] = 3
 
     # --- redis (soft) ---
     redis_host: str = "redis"
@@ -431,6 +439,18 @@ class Settings(BaseSettings):
     def _pool_bounds(self) -> Settings:
         if self.postgres_pool_max < self.postgres_pool_min:
             raise ValueError("postgres_pool_max must be >= postgres_pool_min")
+        return self
+
+    @model_validator(mode="after")
+    def _workflow_dispatch_configured(self) -> Settings:
+        if self.workflow_dispatch_backend != "step_functions":
+            return self
+        arn = self.step_functions_state_machine_arn.strip()
+        if not arn.startswith("arn:") or ":stateMachine:" not in arn:
+            raise ValueError(
+                "step_functions_state_machine_arn must be a State Machine ARN "
+                "when workflow_dispatch_backend is step_functions"
+            )
         return self
 
     @model_validator(mode="after")

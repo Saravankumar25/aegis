@@ -237,7 +237,9 @@ async def reinvestigate(
     if incident.state.is_terminal:
         return {"scheduled": False, "reason": "incident is resolved"}
 
-    jobs = JobQueue(request.app.state.db)
+    jobs = JobQueue(
+        request.app.state.db, request.app.state.settings.workflow_dispatch_backend
+    )
     job_id = await jobs.enqueue(
         incident_id=incident_id,
         kind="investigate",

@@ -77,7 +77,7 @@ from aegis.agents.horizon.tools_self_edit import SPECS as EDIT_SPECS
 from aegis.agents.state import BudgetGuard
 from aegis.core.clock import SYSTEM_CLOCK, Clock
 from aegis.core.config import Settings
-from aegis.core.errors import AegisError, DomainError, NotFoundError
+from aegis.core.errors import AegisError, BudgetExhausted, DomainError, NotFoundError
 from aegis.core.ids import ACTION, AGENT_RUN, VERIFICATION, new_id
 from aegis.core.logging import get_logger
 from aegis.domain.enums import (
@@ -473,15 +473,19 @@ class HorizonOrchestrator:
         return ServiceNaming(self._s.aegis_env.value, "default")
 
     def _budget(self, state: HorizonState) -> BudgetGuard:
-        """Caps the brain cannot raise, sized to what is left of the step budget."""
-        steps_left = max(1, self._s.horizon_max_steps - state.step)
-        return BudgetGuard(
-            max_wall_seconds=steps_left * self._s.horizon_step_timeout_s,
-            max_llm_calls=steps_left,
-            max_tool_calls=steps_left * (MAX_TOOL_CALLS_PER_STEP + 4),
-            max_tokens=10**9,
+        """Restore usage under caps owned only by frozen configuration."""
+        budget = BudgetGuard(
+            max_wall_seconds=self._s.agent_max_wall_seconds,
+            max_llm_calls=self._s.agent_max_llm_calls,
+            max_tool_calls=self._s.agent_max_tool_calls,
+            max_tokens=self._s.agent_max_tokens,
             clock=self._d.clock,
         )
+        elapsed = 0.0
+        if state.started_at is not None:
+            elapsed = max(0.0, (self._d.clock.now() - state.started_at).total_seconds())
+        budget.restore_usage(state.budget_usage, elapsed_s=elapsed)
+        return budget
 
     async def _loop(self, state: HorizonState, max_steps: int | None) -> HorizonState:
         budget = self._budget(state)
@@ -493,7 +497,14 @@ class HorizonOrchestrator:
                 break
             if max_steps is not None and taken >= max_steps:
                 break
-            await self._step(state, budget)
+            try:
+                budget.check(f"horizon:{state.phase.value}")
+                await self._step(state, budget)
+            except BudgetExhausted as exc:
+                state.budget_usage = budget.snapshot()
+                await self._escalate(state, exc.message)
+                await self._checkpoint(state)
+                break
             taken += 1
         return state
 
@@ -515,6 +526,7 @@ class HorizonOrchestrator:
             await self._think(state, budget)
 
         state.updated_at = self._d.clock.now()
+        state.budget_usage = budget.snapshot()
         await self._checkpoint(state)
         await self._emit(
             state,

@@ -28,7 +28,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
@@ -510,6 +510,7 @@ async def open_incident_from_anomaly(
     *,
     environment: str = "local",
     workload: str = "default",
+    dispatch_destination: Literal["postgres", "step_functions"] = "postgres",
 ) -> str | None:
     """Open an incident and schedule its investigation, as alert ingestion does.
 
@@ -520,7 +521,7 @@ async def open_incident_from_anomaly(
     workers running their own heartbeats.
     """
     incidents = IncidentRepository(db)
-    jobs = JobQueue(db)
+    jobs = JobQueue(db, dispatch_destination)
     cid = correlation_id()
     title = (
         f"{anomaly.service}: {anomaly.metric} anomalous ({anomaly.value:.3g}, z={anomaly.z:.1f})"

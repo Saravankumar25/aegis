@@ -139,7 +139,7 @@ async def decide(
 
     enqueued = False
     if approval.decision == "approved":
-        queue = JobQueue(container.db)
+        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
         await queue.enqueue(
             kind="execute_action",
             incident_id=approval.incident_id,
@@ -150,7 +150,7 @@ async def decide(
         # A horizon run parked in AWAITING_APPROVAL must learn it was refused,
         # or it waits forever. The worker treats this as a no-op for incidents
         # the step loop is not driving.
-        queue = JobQueue(container.db)
+        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
         await queue.enqueue(
             kind="horizon_resume",
             incident_id=approval.incident_id,
@@ -162,7 +162,7 @@ async def decide(
         )
         enqueued = True
     elif approval.decision == "more_evidence":
-        queue = JobQueue(container.db)
+        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
         await queue.enqueue(
             kind="investigate",
             incident_id=approval.incident_id,

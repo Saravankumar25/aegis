@@ -39,7 +39,11 @@ async def test_a_renewed_job_survives_the_reaper(db: Database, clean_incident: s
 
     status = await db.fetchval("SELECT status FROM workflow_jobs WHERE id = $1", job_id)
     assert status == "running"
-    await queue.complete(job_id)
+    await queue.complete(
+        job_id,
+        worker_id="worker-a",
+        lease_version=claimed["lease_version"],
+    )
 
 
 async def test_a_lapsed_lease_is_requeued(db: Database, clean_incident: str) -> None:
@@ -50,9 +54,7 @@ async def test_a_lapsed_lease_is_requeued(db: Database, clean_incident: str) -> 
     await _age_lock(db, job_id, LEASE_SECONDS + 5)
     assert await queue.reap_stale() >= 1
 
-    row = await db.fetchrow(
-        "SELECT status, locked_by FROM workflow_jobs WHERE id = $1", job_id
-    )
+    row = await db.fetchrow("SELECT status, locked_by FROM workflow_jobs WHERE id = $1", job_id)
     assert row["status"] == "queued" and row["locked_by"] is None
     await db.execute("DELETE FROM workflow_jobs WHERE id = $1", job_id)
 

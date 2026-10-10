@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import time
 from typing import Any
 
 from aegis.agents.state import BudgetGuard
@@ -109,11 +110,24 @@ def _proposal_from_stored(action: Any) -> Any:
 
 
 class Worker:
-    def __init__(self, worker_id: str, concurrency: int) -> None:
+    def __init__(
+        self,
+        worker_id: str,
+        concurrency: int,
+        *,
+        max_jobs: int | None = None,
+        max_seconds: float | None = None,
+        stop_when_idle: bool = False,
+    ) -> None:
         self.worker_id = worker_id
         self.concurrency = concurrency
+        self.max_jobs = max_jobs
+        self.max_seconds = max_seconds
+        self.stop_when_idle = stop_when_idle
+        self._monotonic = time.monotonic
         self._stopping = asyncio.Event()
         self._inflight: set[asyncio.Task[Any]] = set()
+        self._deadline: float | None = None
         self._settings = get_settings()
         # The worker and the API build the same object graph from the same
         # composition root, so an action the API says needs approval is an
@@ -126,25 +140,31 @@ class Worker:
 
     async def start(self) -> None:
         s = self._settings
+        if self.max_seconds is not None:
+            self._deadline = self._monotonic() + self.max_seconds
         configure_logging(s.log_level, s.log_format)
-        log.info("worker starting", worker_id=self.worker_id, concurrency=self.concurrency)
+        log.info(
+            "worker starting",
+            worker_id=self.worker_id,
+            concurrency=self.concurrency,
+            max_jobs=self.max_jobs,
+            max_seconds=self.max_seconds,
+        )
 
         await self._container.connect()
         await run_migrations(self._db)
 
         unavailable = [
-            name for name, cap in self._container.capabilities.items()
-            if not cap.configured
+            name for name, cap in self._container.capabilities.items() if not cap.configured
         ]
         if unavailable:
-            log.info("worker running with degraded capabilities",
-                     unavailable=unavailable)
+            log.info("worker running with degraded capabilities", unavailable=unavailable)
 
         if s.horizon_driver == "horizon":
             from aegis.worker.horizon_runtime import HorizonRuntime
 
             self._horizon = HorizonRuntime(self._container, s)
-            await self._horizon.start()
+            await self._horizon.start(start_background_loops=not self.stop_when_idle)
 
         # Before the first claim: anything this worker id still holds belongs
         # to a previous incarnation that was killed mid-step.
@@ -166,7 +186,10 @@ class Worker:
     async def _shutdown(self) -> None:
         if self._inflight:
             log.info("draining", jobs=len(self._inflight))
-            _done, pending = await asyncio.wait(self._inflight, timeout=DRAIN_TIMEOUT_S)
+            drain_timeout = DRAIN_TIMEOUT_S
+            if self._deadline is not None:
+                drain_timeout = min(drain_timeout, max(0.0, self._deadline - self._monotonic()))
+            _done, pending = await asyncio.wait(self._inflight, timeout=drain_timeout)
             if pending:
                 # Out of time (ECS stops a task 120 s after SIGTERM, Spot gives
                 # no more). Hand the unfinished jobs back rather than holding
@@ -175,9 +198,15 @@ class Worker:
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-                with contextlib.suppress(Exception):
+                try:
                     released = await JobQueue(self._db).reclaim_own(self.worker_id)
                     log.warning("released unfinished jobs on shutdown", jobs=released)
+                except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                    log.exception(
+                        "failed to release unfinished jobs on shutdown",
+                        worker_id=self.worker_id,
+                        error_type=type(exc).__name__,
+                    )
         if self._horizon is not None:
             await self._horizon.aclose()
         await self._container.aclose()
@@ -205,7 +234,14 @@ class Worker:
 
     async def _poll_loop(self) -> None:
         queue = JobQueue(self._db)
+        claimed = 0
         while not self._stopping.is_set():
+            if self.max_jobs is not None and claimed >= self.max_jobs:
+                log.info("bounded worker reached job limit", jobs=claimed)
+                return
+            if self._deadline is not None and self._monotonic() >= self._deadline:
+                log.info("bounded worker reached time limit", jobs=claimed)
+                return
             if len(self._inflight) >= self.concurrency:
                 await asyncio.sleep(0.25)
                 continue
@@ -221,6 +257,9 @@ class Worker:
                 continue
 
             if job is None:
+                if self.stop_when_idle:
+                    log.info("bounded worker found no work", jobs=claimed)
+                    return
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stopping.wait(), timeout=POLL_INTERVAL_S)
                 continue
@@ -228,6 +267,7 @@ class Worker:
             task = asyncio.create_task(self._run_job(job))
             self._inflight.add(task)
             task.add_done_callback(self._inflight.discard)
+            claimed += 1
 
     async def _run_job(self, job: dict[str, Any]) -> None:
         kind = job.get("kind")
@@ -248,7 +288,7 @@ class Worker:
         elif kind == "horizon_resume":
             # A denial for an incident the step loop is not driving: nothing
             # is parked on it, so there is nothing to resume.
-            await JobQueue(self._db).complete(job["id"])
+            await self._complete(JobQueue(self._db), job)
             return
         if kind == "execute_action":
             await self._run_execution(job)
@@ -276,7 +316,7 @@ class Worker:
                 state = await self._horizon.resume(incident_id, action_id, approved)
             else:
                 state = await self._horizon.run_incident(incident_id)
-            await queue.complete(job["id"])
+            await self._complete(queue, job)
             log.info(
                 "horizon run settled",
                 incident_id=incident_id,
@@ -285,8 +325,14 @@ class Worker:
             )
         except Exception as exc:  # noqa: BLE001 - a bad job must not kill the worker
             log.exception("horizon run failed", incident_id=incident_id, error=str(exc))
-            with contextlib.suppress(Exception):
-                await queue.fail(job["id"], f"{type(exc).__name__}: {exc}")
+            try:
+                await self._fail(queue, job, f"{type(exc).__name__}: {exc}")
+            except Exception as settle_exc:  # noqa: BLE001 - original failure is primary
+                log.exception(
+                    "failed to persist horizon job failure",
+                    job_id=job["id"],
+                    error_type=type(settle_exc).__name__,
+                )
         finally:
             bind_correlation_id(None)
             bind_incident_id(None)
@@ -324,9 +370,11 @@ class Worker:
                     action_id=action_id,
                     approval_present=approval is not None,
                 )
-                await queue.complete(job["id"])
+                await self._complete(queue, job)
                 await self._advance(
-                    incidents, incident_id, IncidentState.ESCALATED,
+                    incidents,
+                    incident_id,
+                    IncidentState.ESCALATED,
                     "approval expired before the action could run",
                 )
                 return
@@ -343,9 +391,11 @@ class Worker:
                     action_id=action_id,
                     incident_id=incident_id,
                 )
-                await queue.complete(job["id"])
+                await self._complete(queue, job)
                 await self._advance(
-                    incidents, incident_id, IncidentState.ESCALATED,
+                    incidents,
+                    incident_id,
+                    IncidentState.ESCALATED,
                     "no runtime adapter is configured; the action was not attempted",
                 )
                 return
@@ -366,19 +416,23 @@ class Worker:
                     matched_rule=outcome.matched_rule,
                     reasons=outcome.reasons,
                 )
-                await queue.complete(job["id"])
+                await self._complete(queue, job)
                 await self._advance(
-                    incidents, incident_id, IncidentState.ESCALATED,
+                    incidents,
+                    incident_id,
+                    IncidentState.ESCALATED,
                     f"action refused on re-check: {outcome.matched_rule}",
                 )
                 return
 
             await self._advance(
-                incidents, incident_id, IncidentState.REMEDIATING,
+                incidents,
+                incident_id,
+                IncidentState.REMEDIATING,
                 "executing an approved action",
             )
             report = await container.execution.execute(outcome, ports)
-            await queue.complete(job["id"])
+            await self._complete(queue, job)
             await self._advance(
                 incidents,
                 incident_id,
@@ -393,8 +447,14 @@ class Worker:
             )
         except AegisError as exc:
             log.error("approved action failed", action_id=action_id, error=str(exc))
-            with contextlib.suppress(Exception):
-                await queue.fail(job["id"], f"{exc.code}: {exc.message}")
+            try:
+                await self._fail(queue, job, f"{exc.code}: {exc.message}")
+            except Exception as settle_exc:  # noqa: BLE001 - original failure is primary
+                log.exception(
+                    "failed to persist action job failure",
+                    job_id=job["id"],
+                    error_type=type(settle_exc).__name__,
+                )
         finally:
             bind_correlation_id(None)
             bind_incident_id(None)
@@ -411,14 +471,19 @@ class Worker:
             incident = await incidents.get(incident_id)
             if incident.state.is_terminal:
                 log.info("incident already resolved; skipping", incident_id=incident_id)
-                await queue.complete(job["id"])
+                await self._complete(queue, job)
                 return
 
-            log.info("investigation starting", incident_id=incident_id,
-                     severity=incident.severity.value, attempt=job["attempts"])
+            log.info(
+                "investigation starting",
+                incident_id=incident_id,
+                severity=incident.severity.value,
+                attempt=job["attempts"],
+            )
 
-            await self._advance(incidents, incident_id, IncidentState.TRIAGING,
-                                "worker picked up investigation")
+            await self._advance(
+                incidents, incident_id, IncidentState.TRIAGING, "worker picked up investigation"
+            )
 
             s = self._settings
             # A fresh budget and a fresh dependency bundle per job: one
@@ -433,8 +498,9 @@ class Worker:
                 )
             )
 
-            await self._advance(incidents, incident_id, IncidentState.INVESTIGATING,
-                                "evidence collection started")
+            await self._advance(
+                incidents, incident_id, IncidentState.INVESTIGATING, "evidence collection started"
+            )
 
             result = await run_investigation(
                 deps,
@@ -447,19 +513,36 @@ class Worker:
             )
 
             await self._settle(incidents, incident_id, result)
-            await queue.complete(job["id"])
-            log.info("investigation finished", incident_id=incident_id,
-                     abstained=bool(result.get("abstained")),
-                     confidence=result.get("confidence"))
+            await self._complete(queue, job)
+            log.info(
+                "investigation finished",
+                incident_id=incident_id,
+                abstained=bool(result.get("abstained")),
+                confidence=result.get("confidence"),
+            )
 
         except Exception as exc:  # noqa: BLE001 - a bad job must not kill the worker
             log.exception("investigation failed", incident_id=incident_id, error=str(exc))
-            with contextlib.suppress(Exception):
-                await queue.fail(job["id"], f"{type(exc).__name__}: {exc}")
-            with contextlib.suppress(Exception):
+            try:
+                await self._fail(queue, job, f"{type(exc).__name__}: {exc}")
+            except Exception as settle_exc:  # noqa: BLE001 - original failure is primary
+                log.exception(
+                    "failed to persist investigation job failure",
+                    job_id=job["id"],
+                    error_type=type(settle_exc).__name__,
+                )
+            try:
                 await incidents.transition(
-                    incident_id, IncidentState.ESCALATED, actor="worker",
+                    incident_id,
+                    IncidentState.ESCALATED,
+                    actor="worker",
                     reason=f"investigation failed: {type(exc).__name__}",
+                )
+            except Exception as transition_exc:  # noqa: BLE001 - failure already recorded
+                log.warning(
+                    "failed to escalate incident after investigation failure",
+                    incident_id=incident_id,
+                    error_type=type(transition_exc).__name__,
                 )
         finally:
             bind_correlation_id(None)
@@ -482,8 +565,41 @@ class Worker:
         try:
             await incidents.transition(incident_id, target, actor="worker", reason=reason)
         except DomainError as exc:
-            log.debug("transition skipped", incident_id=incident_id,
-                      target=target.value, reason=exc.message)
+            log.debug(
+                "transition skipped",
+                incident_id=incident_id,
+                target=target.value,
+                reason=exc.message,
+            )
+
+    async def _complete(self, queue: JobQueue, job: dict[str, Any]) -> None:
+        settled = await queue.complete(
+            job["id"],
+            worker_id=self.worker_id,
+            lease_version=int(job["lease_version"]),
+        )
+        if not settled:
+            log.warning(
+                "job completion refused after lease ownership changed",
+                job_id=job["id"],
+                worker_id=self.worker_id,
+                lease_version=job["lease_version"],
+            )
+
+    async def _fail(self, queue: JobQueue, job: dict[str, Any], error: str) -> None:
+        settled = await queue.fail(
+            job["id"],
+            error,
+            worker_id=self.worker_id,
+            lease_version=int(job["lease_version"]),
+        )
+        if not settled:
+            log.warning(
+                "job failure settlement refused after lease ownership changed",
+                job_id=job["id"],
+                worker_id=self.worker_id,
+                lease_version=job["lease_version"],
+            )
 
     async def _settle(
         self, incidents: IncidentRepository, incident_id: str, result: WorkflowState
@@ -494,8 +610,9 @@ class Worker:
         investigation that could not conclude is unfinished business, not a
         closed incident.
         """
-        await self._advance(incidents, incident_id, IncidentState.DIAGNOSING,
-                            "hypotheses evaluated")
+        await self._advance(
+            incidents, incident_id, IncidentState.DIAGNOSING, "hypotheses evaluated"
+        )
         if result.get("awaiting_approval"):
             target, reason = IncidentState.AWAITING_APPROVAL, "action requires human approval"
         elif result.get("abstained"):
@@ -505,17 +622,35 @@ class Worker:
         await self._advance(incidents, incident_id, target, reason)
 
 
-async def _main() -> None:
+def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aegis investigation worker")
     parser.add_argument(
         "--concurrency", type=int, default=int(os.getenv("WORKER_CONCURRENCY", "2"))
     )
-    parser.add_argument(
-        "--worker-id", default=os.getenv("HOSTNAME", f"worker-{os.getpid()}")
-    )
-    args = parser.parse_args()
+    parser.add_argument("--worker-id", default=os.getenv("HOSTNAME", f"worker-{os.getpid()}"))
+    parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
+    parser.add_argument("--max-jobs", type=int, help="claim at most N jobs, then drain and exit")
+    parser.add_argument("--max-seconds", type=float, help="stop claiming after this time budget")
+    return parser
 
-    worker = Worker(args.worker_id, max(1, args.concurrency))
+
+async def _main() -> None:
+    args = parser().parse_args()
+
+    max_jobs = 1 if args.once else args.max_jobs
+    if max_jobs is not None and max_jobs < 1:
+        raise SystemExit("--max-jobs must be at least 1")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        raise SystemExit("--max-seconds must be greater than 0")
+    bounded = max_jobs is not None or args.max_seconds is not None
+
+    worker = Worker(
+        args.worker_id,
+        max(1, args.concurrency),
+        max_jobs=max_jobs,
+        max_seconds=args.max_seconds,
+        stop_when_idle=bounded,
+    )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         # Windows lacks add_signal_handler; the KeyboardInterrupt path covers it.

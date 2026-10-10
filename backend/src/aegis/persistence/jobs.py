@@ -5,13 +5,15 @@ Using the database we already depend on, rather than adding a broker, keeps
 job can therefore never reference an incident that was rolled back, and a worker
 crash loses nothing because the job row outlives the process.
 
-Pickup uses ``FOR UPDATE SKIP LOCKED``, which gives competing workers
-exactly-once delivery without any coordination between them.
+Pickup uses ``FOR UPDATE SKIP LOCKED``, which gives competing workers exclusive
+claims without any coordination between them. Delivery remains at-least-once:
+side effects must be idempotent, and lease-version fencing prevents a stale
+worker from settling work after another worker has reclaimed it.
 """
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import asyncpg
 
@@ -31,10 +33,15 @@ RENEW_INTERVAL_S: Final = 30.0
 
 
 class JobQueue:
-    __slots__ = ("_db",)
+    __slots__ = ("_db", "_dispatch_destination")
 
-    def __init__(self, db: Database) -> None:
+    def __init__(
+        self,
+        db: Database,
+        dispatch_destination: Literal["postgres", "step_functions"] = "postgres",
+    ) -> None:
         self._db = db
+        self._dispatch_destination = dispatch_destination
 
     async def enqueue(
         self,
@@ -42,6 +49,7 @@ class JobQueue:
         incident_id: str,
         kind: str = "investigate",
         payload: dict[str, Any] | None = None,
+        dispatch_destination: Literal["postgres", "step_functions"] | None = None,
         conn: asyncpg.Connection | None = None,
     ) -> str | None:
         """Schedule work. Idempotent per (incident, kind).
@@ -58,31 +66,74 @@ class JobQueue:
             RETURNING id
         """
         args = (job_id, incident_id, kind, payload or {})
-        row = await (conn.fetchrow(query, *args) if conn else self._db.fetchrow(query, *args))
+        if conn is None:
+            async with self._db.transaction() as transaction:
+                return await self._enqueue_in_transaction(
+                    transaction,
+                    query=query,
+                    args=args,
+                    job_id=job_id,
+                    incident_id=incident_id,
+                    kind=kind,
+                    destination=dispatch_destination or self._dispatch_destination,
+                )
+        return await self._enqueue_in_transaction(
+            conn,
+            query=query,
+            args=args,
+            job_id=job_id,
+            incident_id=incident_id,
+            kind=kind,
+            destination=dispatch_destination or self._dispatch_destination,
+        )
+
+    async def _enqueue_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        query: str,
+        args: tuple[Any, ...],
+        job_id: str,
+        incident_id: str,
+        kind: str,
+        destination: Literal["postgres", "step_functions"],
+    ) -> str | None:
+        row = await conn.fetchrow(query, *args)
         if row is None:
             log.info("job already pending", incident_id=incident_id, kind=kind)
             return None
+        await conn.execute(
+            """
+            UPDATE workflow_dispatch_outbox
+               SET destination=$2, updated_at=now()
+             WHERE job_id=$1
+            """,
+            job_id,
+            destination,
+        )
         return str(row["id"])
 
     async def claim(
-        self, worker_id: str, *, kinds: list[str] | None = None
+        self,
+        worker_id: str,
+        *,
+        kinds: list[str] | None = None,
+        dispatch_destination: Literal["postgres", "step_functions"] = "postgres",
     ) -> dict[str, Any] | None:
         """Atomically claim the next runnable job, or return None.
 
         Everything happens in one statement so two workers cannot claim the same
         row even under contention.
         """
-        kind_filter = "AND kind = ANY($2)" if kinds else ""
-        args: list[Any] = [worker_id]
-        if kinds:
-            args.append(kinds)
-
         row = await self._db.fetchrow(
-            f"""
+            """
             WITH next AS (
-                SELECT id FROM workflow_jobs
-                WHERE status = 'queued' AND run_after <= now() {kind_filter}
-                ORDER BY run_after
+                SELECT j.id FROM workflow_jobs j
+                JOIN workflow_dispatch_outbox o ON o.job_id = j.id
+                WHERE j.status = 'queued' AND j.run_after <= now()
+                  AND ($2::text[] IS NULL OR j.kind = ANY($2))
+                  AND o.destination = $3
+                ORDER BY j.run_after
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
@@ -91,27 +142,48 @@ class JobQueue:
                    locked_by = $1,
                    locked_at = now(),
                    attempts = j.attempts + 1,
+                   lease_version = j.lease_version + 1,
                    updated_at = now()
               FROM next
              WHERE j.id = next.id
-         RETURNING j.id, j.incident_id, j.kind, j.payload, j.attempts, j.max_attempts
+         RETURNING j.id, j.incident_id, j.kind, j.payload, j.attempts,
+                   j.max_attempts, j.lease_version
             """,
-            *args,
+            worker_id,
+            kinds,
+            dispatch_destination,
         )
         return dict(row) if row else None
 
-    async def complete(self, job_id: str) -> None:
-        await self._db.execute(
-            "UPDATE workflow_jobs SET status='done', updated_at=now() WHERE id=$1", job_id
+    async def complete(self, job_id: str, *, worker_id: str, lease_version: int) -> bool:
+        """Settle a job only while the caller still owns its exact lease."""
+        result = await self._db.execute(
+            """
+            UPDATE workflow_jobs SET status='done', updated_at=now()
+             WHERE id=$1
+               AND status='running' AND locked_by=$2 AND lease_version=$3
+            """,
+            job_id,
+            worker_id,
+            lease_version,
         )
+        return result == "UPDATE 1"
 
-    async def fail(self, job_id: str, error: str, *, retry_in_s: int = 30) -> None:
+    async def fail(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        retry_in_s: int = 30,
+        worker_id: str,
+        lease_version: int,
+    ) -> bool:
         """Retry with backoff until max_attempts, then park as failed.
 
         Parking rather than retrying forever is deliberate: a permanently broken
         job should surface to an operator, not spin consuming budget.
         """
-        await self._db.execute(
+        result = await self._db.execute(
             """
             UPDATE workflow_jobs
                SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
@@ -121,9 +193,15 @@ class JobQueue:
                    locked_at = NULL,
                    updated_at = now()
              WHERE id = $1
+               AND status='running' AND locked_by=$4 AND lease_version=$5
             """,
-            job_id, error[:2000], retry_in_s,
+            job_id,
+            error[:2000],
+            retry_in_s,
+            worker_id,
+            lease_version,
         )
+        return result == "UPDATE 1"
 
     async def reap_stale(self, *, older_than_s: int = LEASE_SECONDS) -> int:
         """Requeue jobs whose worker died holding them.
@@ -183,8 +261,11 @@ class JobQueue:
         )
         count = int(result.split()[-1]) if result.startswith("UPDATE") else 0
         if count:
-            log.warning("reclaimed jobs from a previous run of this worker",
-                        worker_id=worker_id, count=count)
+            log.warning(
+                "reclaimed jobs from a previous run of this worker",
+                worker_id=worker_id,
+                count=count,
+            )
         return count
 
     async def stats(self) -> dict[str, int]:
