@@ -1,10 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AlertTriangle } from 'lucide-react';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { signInWithDevToken, signInWithEmail, signInWithGoogle } from '@/lib/auth';
+import {
+  sendPasswordReset,
+  signInWithEmail,
+  signInWithGoogle,
+  signUpWithEmail,
+} from '@/lib/auth';
 import { SignInForms } from './SignInForms';
 
 /**
@@ -26,20 +31,26 @@ export function SignInPanel() {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [devToken, setDevToken] = useState('');
-  const [busy, setBusy] = useState<null | 'google' | 'email' | 'dev'>(null);
+  const [mode, setMode] = useState<'sign-in' | 'sign-up' | 'reset'>('sign-in');
+  const [busy, setBusy] = useState<null | 'google' | 'email' | 'reset'>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   const hasFirebase = modes.includes('firebase');
-  const hasLocal = modes.includes('local');
   const expired = params.get('expired') === '1';
+  const heading = mode === 'sign-up'
+    ? 'Create your Aegis account'
+    : mode === 'reset'
+      ? 'Reset your password'
+      : 'Sign in to Aegis';
 
   // An operator who is already signed in should never be asked again.
   useEffect(() => {
     if (status === 'authenticated') router.replace('/overview');
   }, [status, router]);
 
-  async function run(kind: 'google' | 'email' | 'dev', fn: () => Promise<unknown>) {
+  async function run(kind: 'google' | 'email', fn: () => Promise<unknown>) {
     setBusy(kind);
     setError('');
     try {
@@ -53,10 +64,36 @@ export function SignInPanel() {
     }
   }
 
+  async function submitEmail() {
+    if (mode === 'reset') {
+      setBusy('reset');
+      setError('');
+      setNotice('');
+      try {
+        await sendPasswordReset(email);
+        setNotice('Password reset email sent. Check your inbox, then return to sign in.');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not send the reset email.');
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
+    await run('email', () => mode === 'sign-up'
+      ? signUpWithEmail(email, password)
+      : signInWithEmail(email, password));
+  }
+
   return (
     <div className="flex h-full flex-col justify-center gap-6 px-8 py-12 xl:px-12">
       <header className="space-y-2">
-        <h2 className="text-h2 font-bold tracking-tight text-ink-primary">Sign in to Aegis</h2>
+        <h2
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-h2 font-bold tracking-tight text-ink-primary focus:outline-none"
+        >
+          {heading}
+        </h2>
         <p className="text-body font-medium leading-relaxed text-ink-secondary">
           Access the control plane. Every action you take is attributed to you
           and recorded in the audit trail.
@@ -87,32 +124,41 @@ export function SignInPanel() {
         </div>
       )}
 
-      {!hasFirebase && !hasLocal && (
+      {notice && (
+        <div role="status" className="rounded-card border border-status-ok/30 bg-status-ok/[0.07] px-3.5 py-3">
+          <p className="text-meta font-medium leading-relaxed text-ink-primary">{notice}</p>
+        </div>
+      )}
+
+      {!hasFirebase && (
         <div role="alert" className="rounded-card border border-line bg-surface-2 px-3.5 py-3">
           <p className="text-meta font-semibold text-ink-primary">
             No sign-in method is configured
           </p>
           <p className="mt-1.5 text-meta font-medium leading-relaxed text-ink-tertiary">
             Set the <code className="font-mono text-ink-secondary">NEXT_PUBLIC_FIREBASE_*</code>{' '}
-            variables and rebuild the web image, or run with{' '}
-            <code className="font-mono text-ink-secondary">NEXT_PUBLIC_AEGIS_ENV=local</code>.
+            variables and rebuild the web image. Local development uses the
+            Firebase Auth emulator, never a token pasted into this public page.
           </p>
         </div>
       )}
 
       <SignInForms
         hasFirebase={hasFirebase}
-        hasLocal={hasLocal}
+        mode={mode}
         busy={busy}
         email={email}
         password={password}
-        devToken={devToken}
         onEmailChange={setEmail}
         onPasswordChange={setPassword}
-        onDevTokenChange={setDevToken}
         onGoogle={() => void run('google', signInWithGoogle)}
-        onEmail={() => void run('email', () => signInWithEmail(email, password))}
-        onDev={() => void run('dev', () => signInWithDevToken(devToken))}
+        onEmail={() => void submitEmail()}
+        onModeChange={(next) => {
+          setMode(next);
+          setError('');
+          setNotice('');
+          window.requestAnimationFrame(() => headingRef.current?.focus());
+        }}
       />
 
       <p className="text-meta font-medium leading-relaxed text-ink-tertiary">

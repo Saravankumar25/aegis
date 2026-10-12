@@ -96,11 +96,7 @@ export function notifyUnauthorized() {
 }
 
 export function getAuthToken(): string | null {
-  if (authToken) return authToken;
-  if (typeof window !== 'undefined') {
-    return window.localStorage.getItem('aegis_token');
-  }
-  return null;
+  return authToken;
 }
 
 /**
@@ -186,6 +182,38 @@ export const api = {
   getTimeline: (id: string) => request<TimelineResponse>(`/v1/incidents/${id}/timeline`),
   getHypotheses: (id: string) => request<HypothesesResponse>(`/v1/incidents/${id}/hypotheses`),
   getDiagnosis: (id: string) => request<Diagnosis | null>(`/v1/incidents/${id}/diagnosis`),
+  getSampleIncidents: () => request<{
+    tenant_id: string;
+    environment: string;
+    data_state: 'sample';
+    items: Array<{
+      id: string;
+      version: number;
+      title: string;
+      severity: 'P1' | 'P2' | 'P3' | 'P4';
+      state: string;
+      environment: string;
+      service: string;
+      signal: string;
+      summary: string;
+      learning_goal: string;
+      observed_at: string;
+      data_state: 'sample';
+    }>;
+  }>('/v1/sample/incidents'),
+  pollIncidentEvents: (
+    id: string,
+    lastEventId = 0,
+    limit = 100,
+  ) => request<{
+    incident_id: string;
+    events: Array<{ id: number; type: string; data: Record<string, unknown> }>;
+    last_event_id: number;
+    has_more: boolean;
+  }>(
+    `/v1/incidents/${encodeURIComponent(id)}/events?after=${lastEventId}&limit=${limit}`,
+    { headers: { 'Last-Event-ID': String(lastEventId) } },
+  ),
 
   reinvestigate: (id: string, reason = '') =>
     request<{ scheduled: boolean; reason: string }>(`/v1/incidents/${id}/reinvestigate`, {

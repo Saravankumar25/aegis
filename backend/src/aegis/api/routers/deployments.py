@@ -12,12 +12,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, DbDep, RequireViewer
+from aegis.api.deps import ContainerDep, DbDep, RequireViewer, require_environment
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/deployments", tags=["deployments"])
-
 
 
 def _outcome(exit_code: int | None) -> bool | None:
@@ -30,14 +29,18 @@ def _outcome(exit_code: int | None) -> bool | None:
         return None
     return exit_code == 0
 
+
 @router.get("", summary="Deployment attempts")
 async def list_deployments(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     environment: Annotated[str | None, Query(max_length=64)] = None,
     service_id: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
+    if environment is not None:
+        require_environment(principal, environment)
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     rows = await db.fetch(
         """
         SELECT d.id, d.incident_id, d.action_id, d.patch_id, d.environment,
@@ -48,10 +51,14 @@ async def list_deployments(
           LEFT JOIN verification_runs v ON v.id = d.verification_id
          WHERE ($2::text IS NULL OR d.environment = $2)
            AND ($3::text IS NULL OR d.service_id = $3)
+           AND ($4::text[] IS NULL OR d.environment = ANY($4))
          ORDER BY d.started_at DESC
          LIMIT $1
         """,
-        min(limit, 200), environment, service_id,
+        min(limit, 200),
+        environment,
+        service_id,
+        allowed,
     )
     return {
         "items": [
@@ -69,9 +76,7 @@ async def list_deployments(
                 "verification_verdict": r["verification_verdict"],
                 "error": r["error"],
                 "started_at": r["started_at"].isoformat(),
-                "finished_at": (
-                    r["finished_at"].isoformat() if r["finished_at"] else None
-                ),
+                "finished_at": (r["finished_at"].isoformat() if r["finished_at"] else None),
             }
             for r in rows
         ],
@@ -81,11 +86,12 @@ async def list_deployments(
 
 @router.get("/patches", summary="Candidate remediation patches")
 async def list_patches(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     incident_id: Annotated[str | None, Query(max_length=64)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict[str, Any]:
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     """Proposed code changes, tested or not.
 
     A patch that was generated, tested and rejected is as much a part of the
@@ -100,13 +106,17 @@ async def list_patches(
                rr.exit_code AS reproduction_exit_code,
                tr.exit_code AS test_exit_code
           FROM remediation_patches p
+          JOIN incidents i ON i.id = p.incident_id
           LEFT JOIN sandbox_runs rr ON rr.id = p.reproduction_run_id
           LEFT JOIN sandbox_runs tr ON tr.id = p.test_run_id
          WHERE ($2::text IS NULL OR p.incident_id = $2)
+           AND ($3::text[] IS NULL OR i.environment = ANY($3))
          ORDER BY p.created_at DESC
          LIMIT $1
         """,
-        min(limit, 100), incident_id,
+        min(limit, 100),
+        incident_id,
+        allowed,
     )
     return {
         "items": [
@@ -139,16 +149,16 @@ async def list_patches(
 
 
 @router.get("/patches/{patch_id}/diff", summary="The exact diff of one patch")
-async def patch_diff(
-    patch_id: str, _: RequireViewer, db: DbDep
-) -> dict[str, Any]:
+async def patch_diff(patch_id: str, principal: RequireViewer, db: DbDep) -> dict[str, Any]:
     row = await db.fetchrow(
-        "SELECT id, repo, base_ref, diff, diff_sha256, state FROM "
-        "remediation_patches WHERE id = $1",
+        "SELECT p.id, p.repo, p.base_ref, p.diff, p.diff_sha256, p.state, "
+        "i.environment FROM remediation_patches p "
+        "JOIN incidents i ON i.id = p.incident_id WHERE p.id = $1",
         patch_id,
     )
     if row is None:
         return {"found": False, "id": patch_id}
+    require_environment(principal, str(row["environment"]))
     return {
         "found": True,
         "id": row["id"],
@@ -162,23 +172,28 @@ async def patch_diff(
 
 @router.get("/sandbox-runs", summary="Sandboxed executions")
 async def sandbox_runs(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     incident_id: Annotated[str | None, Query(max_length=64)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict[str, Any]:
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     rows = await db.fetch(
         """
-        SELECT id, incident_id, action_id, purpose, image, repo, base_ref,
-               command, exit_code, timed_out, killed, duration_ms,
-               stdout_excerpt, stderr_excerpt, network, resource_limits,
-               started_at, finished_at
-          FROM sandbox_runs
-         WHERE ($2::text IS NULL OR incident_id = $2)
+        SELECT s.id, s.incident_id, s.action_id, s.purpose, s.image, s.repo,
+               s.base_ref, s.command, s.exit_code, s.timed_out, s.killed,
+               s.duration_ms, s.stdout_excerpt, s.stderr_excerpt, s.network,
+               s.resource_limits, s.started_at, s.finished_at
+          FROM sandbox_runs s
+          JOIN incidents i ON i.id = s.incident_id
+         WHERE ($2::text IS NULL OR s.incident_id = $2)
+           AND ($3::text[] IS NULL OR i.environment = ANY($3))
          ORDER BY started_at DESC
          LIMIT $1
         """,
-        min(limit, 100), incident_id,
+        min(limit, 100),
+        incident_id,
+        allowed,
     )
     return {
         "items": [
@@ -200,9 +215,7 @@ async def sandbox_runs(
                 "network": r["network"],
                 "resource_limits": r["resource_limits"],
                 "started_at": r["started_at"].isoformat(),
-                "finished_at": (
-                    r["finished_at"].isoformat() if r["finished_at"] else None
-                ),
+                "finished_at": (r["finished_at"].isoformat() if r["finished_at"] else None),
             }
             for r in rows
         ],
@@ -211,12 +224,11 @@ async def sandbox_runs(
 
 
 @router.get("/environments", summary="Environments Aegis can see")
-async def environments(_: RequireViewer, container: ContainerDep) -> dict[str, Any]:
+async def environments(principal: RequireViewer, container: ContainerDep) -> dict[str, Any]:
+    require_environment(principal, container.settings.aegis_environment_name)
     return {
         "current": container.settings.aegis_environment_name,
         "adapter": container.settings.workload_adapter,
-        "runtime_available": bool(
-            container.runtime is not None and container.runtime.available
-        ),
+        "runtime_available": bool(container.runtime is not None and container.runtime.available),
         "is_production": container.settings.is_production,
     }

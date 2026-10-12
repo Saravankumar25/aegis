@@ -1,5 +1,5 @@
 import {
-  Activity, AlertCircle, BarChart3, Boxes, Bug, CheckSquare, FileSearch,
+  Activity, AlertCircle, BarChart3, Boxes, Bug, CheckSquare, Compass, FileSearch,
   GitBranch, MonitorPlay, Network, ScrollText, Settings, ShieldCheck, Siren, Workflow,
   type LucideIcon,
 } from 'lucide-react';
@@ -24,6 +24,7 @@ import {
  */
 export type NavHref =
   | '/overview'
+  | '/explore'
   | '/incidents'
   | '/systems'
   | '/tasks'
@@ -62,6 +63,7 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     label: 'Command',
     items: [
       { href: '/overview', label: 'Home', icon: Activity, keywords: 'overview command centre' },
+      { href: '/explore', label: 'Explore sample', icon: Compass, keywords: 'first run tutorial scenario' },
       { href: '/incidents', label: 'Incidents', icon: Siren },
       { href: '/systems', label: 'Live Systems', icon: Boxes, keywords: 'services topology' },
       { href: '/tasks', label: 'My Tasks', icon: CheckSquare },
@@ -106,3 +108,48 @@ export const NAV_SECTIONS: readonly NavSection[] = [
 export const NAV_DESTINATIONS: readonly NavDestination[] = NAV_SECTIONS.flatMap(
   (section) => section.items,
 );
+
+const LABEL_BY_SEGMENT = new Map(
+  NAV_DESTINATIONS.map((destination) => [destination.href.slice(1), destination.label]),
+);
+
+export type Breadcrumb = { readonly href: string; readonly label: string };
+
+/**
+ * Derive a stable, human-readable trail from a console path. Route ids remain
+ * visible because an incident responder needs a copyable identity, but route
+ * implementation names never leak into the interface.
+ */
+export function buildBreadcrumbs(pathname: string): readonly Breadcrumb[] {
+  const parts = pathname.split('/').filter(Boolean);
+  if (parts.length === 0) return [{ href: '/overview', label: 'Home' }];
+
+  let accumulated = '';
+  return parts.map((part, index) => {
+    accumulated += `/${part}`;
+    const knownLabel = index === 0 ? LABEL_BY_SEGMENT.get(part) : undefined;
+    const identifier = part.startsWith('inc_')
+      ? part.slice(0, 12).toUpperCase()
+      : part.replaceAll('-', ' ');
+    return {
+      href: accumulated,
+      label: knownLabel ?? identifier.charAt(0).toUpperCase() + identifier.slice(1),
+    };
+  });
+}
+
+const RELATED_BY_ROOT: Readonly<Record<string, readonly NavHref[]>> = {
+  incidents: ['/systems', '/graph', '/approvals'],
+  investigations: ['/incidents', '/graph', '/debug'],
+  systems: ['/incidents', '/graph', '/reliability'],
+  graph: ['/systems', '/incidents', '/investigations'],
+  explore: ['/incidents', '/systems', '/evaluation'],
+};
+
+export function relatedDestinations(pathname: string): readonly NavDestination[] {
+  const root = pathname.split('/').filter(Boolean)[0] ?? 'overview';
+  const hrefs = RELATED_BY_ROOT[root] ?? ['/incidents', '/systems', '/tasks'];
+  return hrefs
+    .map((href) => NAV_DESTINATIONS.find((destination) => destination.href === href))
+    .filter((destination): destination is NavDestination => destination !== undefined);
+}

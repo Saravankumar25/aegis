@@ -106,6 +106,7 @@ class IncidentRepository:
         states: list[str] | None = None,
         severities: list[str] | None = None,
         environment: str | None = None,
+        environments: list[str] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Incident]:
@@ -125,6 +126,9 @@ class IncidentRepository:
         if environment:
             args.append(environment)
             clauses.append(f"environment = ${len(args)}")
+        elif environments is not None:
+            args.append(environments)
+            clauses.append(f"environment = ANY(${len(args)})")
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
 
         args.append(max(1, min(limit, 200)))
@@ -148,6 +152,23 @@ class IncidentRepository:
                 "SELECT count(*) FROM incidents WHERE resolved_at IS NULL"
             )
         return int(value or 0)
+
+    async def count_open_in(self, environments: list[str]) -> int:
+        value = await self._db.fetchval(
+            "SELECT count(*) FROM incidents WHERE resolved_at IS NULL AND environment = ANY($1)",
+            environments,
+        )
+        return int(value or 0)
+
+    async def environments_for(self, incident_ids: list[str]) -> dict[str, str]:
+        """Resolve incident environments in one bounded query for access filtering."""
+        if not incident_ids:
+            return {}
+        rows = await self._db.fetch(
+            "SELECT id, environment FROM incidents WHERE id = ANY($1)",
+            list(dict.fromkeys(incident_ids)),
+        )
+        return {str(row["id"]): str(row["environment"]) for row in rows}
 
     async def transition(
         self,

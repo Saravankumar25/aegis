@@ -11,7 +11,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, RequireViewer
+from aegis.api.deps import (
+    ContainerDep,
+    RequireViewer,
+    environment_allowed,
+    require_environment,
+)
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -35,7 +40,7 @@ def _render(record: Any) -> dict[str, Any]:
 
 @router.get("", summary="Audit events, newest first")
 async def recent(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     event_type: Annotated[str | None, Query(max_length=64)] = None,
     actor_type: Annotated[str | None, Query(pattern="^(human|agent|system)$")] = None,
@@ -48,6 +53,17 @@ async def recent(
         actor_type=actor_type,
         correlation_id=correlation_id,
     )
+    incident_ids = [str(record.incident_id) for record in records if record.incident_id]
+    environments = await container.incidents.environments_for(incident_ids)
+    records = [
+        record
+        for record in records
+        if not record.incident_id
+        or (
+            str(record.incident_id) in environments
+            and environment_allowed(principal, environments[str(record.incident_id)])
+        )
+    ]
     return {
         "items": [_render(r) for r in records],
         "count": len(records),
@@ -60,10 +76,12 @@ async def recent(
 @router.get("/incident/{incident_id}", summary="Full audit trail for one incident")
 async def for_incident(
     incident_id: str,
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ) -> dict[str, Any]:
+    incident = await container.incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     records = await container.audit.for_incident(incident_id, limit=limit)
     human_decisions = [r for r in records if r.actor_type == "human"]
     return {

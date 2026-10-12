@@ -3,13 +3,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { getAuthToken, setAuthToken } from '@/lib/api';
 import {
   IDENTITY_KEY,
-  TOKEN_KEY,
   availableModes,
   clearSession,
   firebaseConfig,
   type Identity,
   readSession,
-  signInWithDevToken,
   storeSession,
 } from '@/lib/auth';
 
@@ -28,7 +26,7 @@ const IDENTITY: Identity = {
   email: 'dev@localhost',
   displayName: 'Local Developer',
   photoURL: null,
-  mode: 'local',
+  mode: 'firebase',
 };
 
 /** A complete Firebase web config; individual keys are removed per test. */
@@ -64,10 +62,10 @@ describe('what this deployment can offer', () => {
     expect(availableModes()).toEqual(['unconfigured']);
   });
 
-  test('the local environment offers the development bypass', () => {
+  test('the local environment does not publish a development-token bypass', () => {
     vi.stubEnv('NEXT_PUBLIC_AEGIS_ENV', 'local');
 
-    expect(availableModes()).toEqual(['local']);
+    expect(availableModes()).toEqual(['unconfigured']);
   });
 
   test('an unconfigured environment does not offer the development bypass', () => {
@@ -115,54 +113,23 @@ describe('firebaseConfig', () => {
   });
 });
 
-describe('the development bypass', () => {
-  test('development sign-in refuses outside the local environment', async () => {
-    // The pre-shared token the API accepts under AUTH_DEV_MODE must never be a
-    // route into a deployed console. The backend refuses to boot production
-    // with that flag set; this is the same refusal on the browser side.
-    vi.stubEnv('NEXT_PUBLIC_AEGIS_ENV', 'staging');
-
-    await expect(signInWithDevToken('a-real-looking-token')).rejects.toThrow(/only available in the local environment/i);
-    expect(window.localStorage.getItem(TOKEN_KEY)).toBeNull();
-    expect(getAuthToken()).toBeNull();
-  });
-
-  test('a rejected development sign-in stores nothing, even in the local environment', async () => {
-    // An empty token would be stored as a credential and sent on every
-    // subsequent request, turning a mistyped sign-in into a stream of 401s.
-    vi.stubEnv('NEXT_PUBLIC_AEGIS_ENV', 'local');
-
-    await expect(signInWithDevToken('   ')).rejects.toThrow(/Enter the development access token/i);
-    expect(window.localStorage.getItem(TOKEN_KEY)).toBeNull();
-    expect(getAuthToken()).toBeNull();
-  });
-
-  test('a successful development sign-in trims the token and arms the client immediately', async () => {
-    // The in-memory token matters as much as the stored one: the first request
-    // after sign-in fires before any reload, so it must already carry it.
-    vi.stubEnv('NEXT_PUBLIC_AEGIS_ENV', 'local');
-
-    const result = await signInWithDevToken('  token-xyz  ');
-
-    expect(result.token).toBe('token-xyz');
-    expect(result.identity.mode).toBe('local');
-    expect(getAuthToken()).toBe('token-xyz');
-    expect(window.localStorage.getItem(TOKEN_KEY)).toBe('token-xyz');
-  });
-});
-
 describe('session persistence', () => {
-  test('a stored session round-trips so a reload does not bounce an operator mid-incident', () => {
+  test('a stored session keeps the bearer token in memory only', () => {
     storeSession('token-123', IDENTITY);
-    setAuthToken(null); // simulate the fresh module state after a page reload
 
     const restored = readSession();
 
     expect(restored.token).toBe('token-123');
     expect(restored.identity).toEqual(IDENTITY);
-    // Reading the session must also re-arm the client, or the first request
-    // after a reload goes out unauthenticated and the console bounces anyway.
     expect(getAuthToken()).toBe('token-123');
+    expect(window.localStorage.getItem('aegis_token')).toBeNull();
+  });
+
+  test('a reload waits for Firebase to restore the credential', () => {
+    storeSession('token-123', IDENTITY);
+    setAuthToken(null);
+
+    expect(readSession()).toEqual({ token: null, identity: IDENTITY });
   });
 
   test('a browser that refuses storage keeps the in-memory session', () => {
@@ -190,21 +157,20 @@ describe('session persistence', () => {
   test('a corrupted identity does not strand the console on a parse error', () => {
     // Half-written storage is a real failure mode. It must degrade to "signed
     // out", not to an unhandled SyntaxError during hydration.
-    window.localStorage.setItem(TOKEN_KEY, 'token-123');
+    storeSession('token-123', IDENTITY);
     window.localStorage.setItem(IDENTITY_KEY, '{not json');
 
     expect(readSession()).toEqual({ token: null, identity: null });
   });
 
-  test('clearing a session removes the credential from memory and from storage', () => {
-    // A token left in localStorage after sign-out is readable by anything that
-    // can run script on this origin.
+  test('clearing a session removes memory state and any legacy stored token', () => {
     storeSession('token-123', IDENTITY);
+    window.localStorage.setItem('aegis_token', 'legacy-token');
 
     clearSession();
 
     expect(getAuthToken()).toBeNull();
-    expect(window.localStorage.getItem(TOKEN_KEY)).toBeNull();
+    expect(window.localStorage.getItem('aegis_token')).toBeNull();
     expect(window.localStorage.getItem(IDENTITY_KEY)).toBeNull();
   });
 });

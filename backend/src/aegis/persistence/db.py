@@ -16,7 +16,7 @@ from typing import Any
 import asyncpg
 
 from aegis.core.config import Settings
-from aegis.core.errors import ExternalServiceError
+from aegis.core.errors import DatabaseResuming
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -26,12 +26,8 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     """Per-connection setup applied to every pooled connection."""
     # asyncpg returns JSONB as str by default; decode once here so repositories
     # never sprinkle json.loads across the codebase.
-    await conn.set_type_codec(
-        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
-    )
-    await conn.set_type_codec(
-        "json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
-    )
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+    await conn.set_type_codec("json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
 class Database:
@@ -46,7 +42,7 @@ class Database:
     @property
     def pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            raise ExternalServiceError("database pool is not initialised", code="DB_NOT_READY")
+            raise DatabaseResuming("database is resuming; retry after the advertised delay")
         return self._pool
 
     @property
@@ -57,25 +53,38 @@ class Database:
         if self._pool is not None:
             return
         s = self._settings
-        self._pool = await asyncpg.create_pool(
-            host=s.postgres_host,
-            port=s.postgres_port,
-            database=s.postgres_db,
-            user=s.postgres_user,
-            password=s.postgres_password.get_secret_value(),
-            min_size=s.postgres_pool_min,
-            max_size=s.postgres_pool_max,
-            command_timeout=s.postgres_statement_timeout_ms / 1000,
-            max_inactive_connection_lifetime=300.0,
-            init=_init_connection,
-            server_settings={
-                "application_name": f"aegis-{s.otel_service_name}",
-                "statement_timeout": str(s.postgres_statement_timeout_ms),
-                # Guards against a transaction left open by a crashed caller
-                # holding locks forever.
-                "idle_in_transaction_session_timeout": "30000",
-            },
-        )
+        try:
+            self._pool = await asyncpg.create_pool(
+                host=s.postgres_host,
+                port=s.postgres_port,
+                database=s.postgres_db,
+                user=s.postgres_user,
+                password=s.postgres_password.get_secret_value(),
+                min_size=s.postgres_pool_min,
+                max_size=s.postgres_pool_max,
+                command_timeout=s.postgres_statement_timeout_ms / 1000,
+                max_inactive_connection_lifetime=300.0,
+                init=_init_connection,
+                server_settings={
+                    "application_name": f"aegis-{s.otel_service_name}",
+                    "statement_timeout": str(s.postgres_statement_timeout_ms),
+                    # Guards against a transaction left open by a crashed caller
+                    # holding locks forever.
+                    "idle_in_transaction_session_timeout": "30000",
+                },
+            )
+        except (
+            asyncpg.CannotConnectNowError,
+            asyncpg.ConnectionDoesNotExistError,
+            asyncpg.PostgresConnectionError,
+            asyncpg.TooManyConnectionsError,
+            OSError,
+            TimeoutError,
+        ) as exc:
+            raise DatabaseResuming(
+                "database is resuming; retry after the advertised delay",
+                context={"dependency": "postgres"},
+            ) from exc
         log.info(
             "database pool ready",
             host=s.postgres_host,

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     # --- identity ---
     aegis_env: Environment = Environment.LOCAL
     aegis_environment_name: str = "local-docker"
+    aegis_tenant_id: str = "aegis-local"
     aegis_version: str = "2.0.0"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "console"] = "json"
@@ -53,6 +54,9 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"  # noqa: S104 - containerised, bound by compose
     api_port: Port = 8000
     api_public_url: str = "http://localhost:8000"
+    api_runtime: Literal["service", "lambda"] = "service"
+    api_run_migrations: bool = True
+    database_resume_retry_after_s: Annotated[int, Field(ge=1, le=300)] = 15
     cors_allowed_origins: str = "http://localhost:3000"
     alert_ingest_token: SecretStr = SecretStr("")
     internal_signing_key: SecretStr = SecretStr("")
@@ -142,8 +146,12 @@ class Settings(BaseSettings):
     # --- auth ---
     firebase_project_id: str = ""
     firebase_service_account_path: str = ""
+    firebase_auth_emulator_host: str = ""
     auth_dev_mode: bool = False
     auth_dev_bypass_token: SecretStr = SecretStr("")
+    sample_mode_enabled: bool = True
+    sample_tenant_id: str = "aegis-sample"
+    sample_environment_name: str = "sample"
 
     # --- slack ---
     # Read here rather than from os.environ inside the client, so that the
@@ -454,6 +462,15 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _lambda_migrations_external(self) -> Settings:
+        if self.api_runtime == "lambda" and self.api_run_migrations:
+            raise ValueError(
+                "api_run_migrations must be false in the Lambda runtime; "
+                "run python -m aegis.persistence.migrate_cli as a one-off job"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _production_hardening(self) -> Settings:
         """Refuse to start in production with development affordances enabled."""
         if not self.is_production:
@@ -461,6 +478,8 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.auth_dev_mode:
             problems.append("auth_dev_mode must be false in production")
+        if self.firebase_auth_emulator_host:
+            problems.append("firebase_auth_emulator_host must be empty in production")
         if "*" in self.cors_allowed_origins:
             problems.append("wildcard CORS origin is not allowed in production")
         if not self.alert_ingest_token.get_secret_value():

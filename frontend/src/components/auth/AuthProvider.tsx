@@ -6,6 +6,7 @@ import {
   type Identity,
   availableModes,
   clearSession,
+  observeFirebaseSession,
   readSession,
   signOut as doSignOut,
 } from '@/lib/auth';
@@ -42,11 +43,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStatus(token ? 'authenticated' : 'anonymous');
   }, []);
 
-  // Reading storage in an effect keeps the server and first client render
-  // identical, which is what avoids a hydration mismatch on every page.
+  // Firebase owns persistence. Its observer refreshes the ID token on reload
+  // and whenever the SDK rotates it; localStorage is only the API client's
+  // immediate cache, never the authority for whether a session is still live.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let active = true;
+    let unsubscribe = () => {};
+    void observeFirebaseSession((session) => {
+      if (!active) return;
+      setIdentity(session?.identity ?? null);
+      setStatus(session ? 'authenticated' : 'anonymous');
+    }).then((stop) => {
+      if (active) unsubscribe = stop;
+      else stop();
+    }).catch(() => {
+      if (!active) return;
+      clearSession();
+      setIdentity(null);
+      setStatus('anonymous');
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   /**
    * A 401 from any request ends the session immediately.
@@ -57,21 +77,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    */
   useEffect(() => {
     return onUnauthorized(() => {
-      clearSession();
-      setIdentity(null);
-      setStatus('anonymous');
-      router.replace('/?expired=1');
+      void doSignOut().finally(() => {
+        setIdentity(null);
+        setStatus('anonymous');
+        router.replace('/?expired=1');
+      });
     });
   }, [router]);
-
-  // Sign-out in one tab must not leave another tab holding a live console.
-  useEffect(() => {
-    function onStorage(event: StorageEvent) {
-      if (event.key === 'aegis_token') refresh();
-    }
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, [refresh]);
 
   const signOut = useCallback(async () => {
     await doSignOut();

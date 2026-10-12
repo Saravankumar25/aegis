@@ -19,7 +19,15 @@ const compat = new FlatCompat({
  * everywhere, and then the config stops meaning anything.
  */
 const config = [
-  { ignores: ['.next/**', 'node_modules/**', 'next-env.d.ts', 'out/**'] },
+  {
+    ignores: [
+      '.next/**',
+      '.next.failed-build-cache/**',
+      'node_modules/**',
+      'next-env.d.ts',
+      'out/**',
+    ],
+  },
   ...compat.extends('next/core-web-vitals', 'next/typescript'),
   {
     rules: {

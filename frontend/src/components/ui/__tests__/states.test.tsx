@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, test, vi } from 'vitest';
 
 import { ApiError, NetworkError } from '@/lib/api';
-import { EmptyState, ErrorState, QueryFailure, SourceUnavailableState } from '@/components/ui/states';
+import { EmptyState, ErrorState, PermissionState, QueryFailure, SourceUnavailableState } from '@/components/ui/states';
 
 /**
  * The UI half of invariant 6: "no evidence found" is not "source unavailable".
@@ -110,6 +110,16 @@ describe('ErrorState', () => {
   });
 });
 
+describe('PermissionState', () => {
+  test('states the denied scope and a recovery path without implying an outage', () => {
+    render(<PermissionState resource="production evidence" requiredRole="incident responder" />);
+    expect(screen.getByRole('status')).toHaveTextContent('Access required');
+    expect(screen.getByRole('status')).toHaveTextContent('production evidence');
+    expect(screen.getByRole('status')).toHaveTextContent('incident responder');
+    expect(screen.queryByText(/unavailable/i)).toBeNull();
+  });
+});
+
 describe('QueryFailure', () => {
   const props = {
     title: 'Cannot load the diagnosis',
@@ -179,6 +189,21 @@ describe('QueryFailure', () => {
     expect(alert).toHaveTextContent('500');
     expect(alert).toHaveTextContent('corr-9f2');
     expect(screen.queryByText(/unavailable$/)).toBeNull();
+  });
+
+  test('a forbidden response is an access state without a pointless retry', () => {
+    const onRetry = vi.fn();
+    render(
+      <QueryFailure
+        {...props}
+        error={new ApiError(403, 'AUTHORIZATION_ERROR', 'Environment access is required.')}
+        onRetry={onRetry}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('Access required');
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   test('an error of no known shape is an error, never a silent outage', () => {

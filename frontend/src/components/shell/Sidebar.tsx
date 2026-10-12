@@ -41,7 +41,7 @@ export function Sidebar() {
     <nav
       aria-label="Primary"
       className={cn(
-        'flex shrink-0 flex-col border-r border-hairline bg-canvas transition-[width] duration-200',
+        'hidden shrink-0 flex-col border-r border-hairline bg-canvas transition-[width] duration-200 lg:flex',
         collapsed ? 'w-[68px]' : 'w-[236px]',
       )}
     >

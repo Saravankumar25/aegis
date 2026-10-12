@@ -6,6 +6,7 @@ import { Toaster } from 'sonner';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 import { CommandPalette } from './CommandPalette';
+import { MobileNavigation } from './MobileNavigation';
 
 /**
  * Retries are bounded and 4xx is never retried: a 403 will not become a 200 by
@@ -31,17 +32,22 @@ function makeQueryClient() {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [client] = useState(makeQueryClient);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
 
   return (
     <QueryClientProvider client={client}>
       <div className="flex h-screen overflow-hidden bg-canvas">
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar onOpenPalette={() => setPaletteOpen(true)} />
+          <TopBar
+            onOpenPalette={() => setPaletteOpen(true)}
+            onOpenNavigation={() => setNavigationOpen(true)}
+          />
           <main className="flex-1 overflow-y-auto">{children}</main>
         </div>
       </div>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <MobileNavigation open={navigationOpen} onClose={() => setNavigationOpen(false)} />
       <Toaster
         theme="dark"
         position="bottom-right"

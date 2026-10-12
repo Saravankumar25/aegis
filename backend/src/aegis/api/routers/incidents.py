@@ -12,7 +12,13 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from aegis.api.deps import EvidenceDep, IncidentsDep, RequireResponder, RequireViewer
+from aegis.api.deps import (
+    EvidenceDep,
+    IncidentsDep,
+    RequireResponder,
+    RequireViewer,
+    require_environment,
+)
 from aegis.core.logging import get_logger
 from aegis.domain.enums import IncidentState
 from aegis.domain.models import Incident
@@ -54,7 +60,7 @@ class EvidenceView(BaseModel):
 
 @router.get("", response_model=IncidentList, summary="List incidents")
 async def list_incidents(
-    _: RequireViewer,
+    principal: RequireViewer,
     incidents: IncidentsDep,
     state: Annotated[list[str] | None, Query()] = None,
     severity: Annotated[list[str] | None, Query()] = None,
@@ -62,13 +68,24 @@ async def list_incidents(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> IncidentList:
+    if environment is not None:
+        require_environment(principal, environment)
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     items = await incidents.search(
-        states=state, severities=severity, environment=environment,
-        limit=limit, offset=offset,
+        states=state,
+        severities=severity,
+        environment=environment,
+        environments=allowed if environment is None else None,
+        limit=limit,
+        offset=offset,
     )
     return IncidentList(
         items=items,
-        total_open=await incidents.count_open(environment),
+        total_open=(
+            await incidents.count_open(environment)
+            if environment is not None or allowed is None
+            else await incidents.count_open_in(allowed)
+        ),
         limit=limit,
         offset=offset,
     )
@@ -76,18 +93,23 @@ async def list_incidents(
 
 @router.get("/{incident_id}", response_model=Incident, summary="Get one incident")
 async def get_incident(
-    incident_id: str, _: RequireViewer, incidents: IncidentsDep
+    incident_id: str, principal: RequireViewer, incidents: IncidentsDep
 ) -> Incident:
-    return await incidents.get(incident_id)
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
+    return incident
 
 
 @router.get("/{incident_id}/evidence", summary="Evidence for an incident")
 async def get_evidence(
     incident_id: str,
-    _: RequireViewer,
+    principal: RequireViewer,
+    incidents: IncidentsDep,
     evidence: EvidenceDep,
     include_gaps: Annotated[bool, Query()] = True,
 ) -> dict[str, Any]:
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     items = await evidence.list_for_incident(incident_id, include_gaps=include_gaps)
     gaps = [i for i in items if i.is_gap]
     return {
@@ -120,13 +142,15 @@ async def get_evidence(
 
 @router.get("/{incident_id}/timeline", summary="Incident timeline")
 async def get_timeline(
-    incident_id: str, _: RequireViewer, incidents: IncidentsDep, request: Request
+    incident_id: str, principal: RequireViewer, incidents: IncidentsDep, request: Request
 ) -> dict[str, Any]:
     """Merged forensic record: transitions, agent activity and tool calls.
 
     Tool calls are capped so a pathological investigation cannot return an
     unbounded payload to the browser.
     """
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     db = request.app.state.db
     transitions = await incidents.timeline(incident_id)
 
@@ -149,33 +173,39 @@ async def get_timeline(
     events: list[dict[str, Any]] = []
     for t in transitions:
         prior = t["from_state"] or "new"
-        events.append({
-            "kind": "STATE",
-            "at": t["created_at"],
-            "title": f"{prior} -> {t['to_state']}",
-            "detail": t["reason"],
-            "actor": t["actor"],
-        })
+        events.append(
+            {
+                "kind": "STATE",
+                "at": t["created_at"],
+                "title": f"{prior} -> {t['to_state']}",
+                "detail": t["reason"],
+                "actor": t["actor"],
+            }
+        )
     for a in agent_rows:
-        events.append({
-            "kind": "AI",
-            "at": a["started_at"],
-            "title": a["agent_role"],
-            "detail": a["result_summary"] or a["task"],
-            "evidence_ids": list(a["evidence_ids"] or []),
-            "duration_ms": a["duration_ms"],
-            "status": a["status"],
-        })
+        events.append(
+            {
+                "kind": "AI",
+                "at": a["started_at"],
+                "title": a["agent_role"],
+                "detail": a["result_summary"] or a["task"],
+                "evidence_ids": list(a["evidence_ids"] or []),
+                "duration_ms": a["duration_ms"],
+                "status": a["status"],
+            }
+        )
     for c in tool_rows:
-        events.append({
-            "kind": "TOOL",
-            "at": c["created_at"],
-            "title": f"{c['server']}.{c['tool']}",
-            "detail": c["result_summary"],
-            "ok": c["ok"],
-            "access": c["access"],
-            "duration_ms": c["duration_ms"],
-        })
+        events.append(
+            {
+                "kind": "TOOL",
+                "at": c["created_at"],
+                "title": f"{c['server']}.{c['tool']}",
+                "detail": c["result_summary"],
+                "ok": c["ok"],
+                "access": c["access"],
+                "duration_ms": c["duration_ms"],
+            }
+        )
 
     events.sort(key=lambda e: e["at"])
     return {"events": events, "gaps": await incidents.gaps(incident_id)}
@@ -183,9 +213,11 @@ async def get_timeline(
 
 @router.get("/{incident_id}/hypotheses", summary="Hypothesis stack")
 async def get_hypotheses(
-    incident_id: str, _: RequireViewer, request: Request
+    incident_id: str, principal: RequireViewer, incidents: IncidentsDep, request: Request
 ) -> dict[str, Any]:
     """The competing-hypothesis stack plus how confidence moved over time."""
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     db = request.app.state.db
     rows = await db.fetch(
         """
@@ -212,8 +244,10 @@ async def get_hypotheses(
 
 @router.get("/{incident_id}/diagnosis", summary="Current diagnosis")
 async def get_diagnosis(
-    incident_id: str, _: RequireViewer, request: Request
+    incident_id: str, principal: RequireViewer, incidents: IncidentsDep, request: Request
 ) -> dict[str, Any] | None:
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     row = await request.app.state.db.fetchrow(
         "SELECT * FROM diagnoses WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1",
         incident_id,
@@ -234,12 +268,11 @@ async def reinvestigate(
     request: Request,
 ) -> dict[str, Any]:
     incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     if incident.state.is_terminal:
         return {"scheduled": False, "reason": "incident is resolved"}
 
-    jobs = JobQueue(
-        request.app.state.db, request.app.state.settings.workflow_dispatch_backend
-    )
+    jobs = JobQueue(request.app.state.db, request.app.state.settings.workflow_dispatch_backend)
     job_id = await jobs.enqueue(
         incident_id=incident_id,
         kind="investigate",
@@ -262,6 +295,8 @@ async def resolve(
     principal: RequireResponder,
     incidents: IncidentsDep,
 ) -> Incident:
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     return await incidents.transition(
         incident_id, IncidentState.RESOLVED, actor=principal.uid, reason=body.reason
     )

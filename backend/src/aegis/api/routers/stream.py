@@ -17,10 +17,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, Query, Request, Response
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from aegis.api.deps import IncidentsDep, RequireViewer
+from aegis.api.deps import IncidentsDep, RequireViewer, require_environment
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -30,6 +31,27 @@ HEARTBEAT_S = 15.0
 # A slow browser must not make the server buffer without bound; if the client
 # falls this far behind we drop it and let it reconnect with Last-Event-ID.
 MAX_QUEUE = 100
+
+
+class IncidentEvent(BaseModel):
+    id: int = Field(ge=1)
+    type: str
+    data: dict[str, Any]
+
+
+class IncidentEventPage(BaseModel):
+    incident_id: str
+    events: list[IncidentEvent]
+    last_event_id: int = Field(ge=0)
+    has_more: bool
+
+
+def _resume_point(last_event_id: str | None, after: int) -> int:
+    if last_event_id is None:
+        return after
+    if not last_event_id.isdigit():
+        return after
+    return max(after, int(last_event_id))
 
 
 def channel_for(incident_id: str) -> str:
@@ -54,12 +76,13 @@ async def publish(redis: Any, incident_id: str, event: dict[str, Any]) -> None:
 async def stream_incident(
     incident_id: str,
     request: Request,
-    _: RequireViewer,
+    principal: RequireViewer,
     incidents: IncidentsDep,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> EventSourceResponse:
     # Verifies existence and that the caller may see it before opening a stream.
     incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     redis = request.app.state.redis
 
     async def generator() -> AsyncIterator[dict[str, Any]]:
@@ -115,8 +138,7 @@ async def stream_incident(
                 try:
                     body = json.loads(payload) if isinstance(payload, str) else {}
                 except json.JSONDecodeError:
-                    log.warning("dropped malformed stream payload",
-                                incident_id=incident_id)
+                    log.warning("dropped malformed stream payload", incident_id=incident_id)
                     continue
                 yield {
                     "id": str(seq),
@@ -133,3 +155,45 @@ async def stream_incident(
                 log.warning("pubsub cleanup failed", error=str(exc))
 
     return EventSourceResponse(generator(), send_timeout=30)
+
+
+@router.get(
+    "/incidents/{incident_id}/events",
+    response_model=IncidentEventPage,
+    summary="Replayable incident events for polling clients",
+)
+async def poll_incident_events(
+    incident_id: str,
+    response: Response,
+    request: Request,
+    principal: RequireViewer,
+    incidents: IncidentsDep,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+    after: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> IncidentEventPage:
+    """Authenticated replay using the same monotonic Postgres ids as SSE clients."""
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
+    start = _resume_point(last_event_id, after)
+    store = request.app.state.horizon_store
+    rows = await store.events(incident_id, after_seq=start, limit=limit + 1)
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    events = [
+        IncidentEvent(
+            id=seq,
+            type=event.event_type.value,
+            data=event.model_dump(mode="json"),
+        )
+        for seq, event in page
+    ]
+    high_water = events[-1].id if events else start
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Last-Event-ID"] = str(high_water)
+    return IncidentEventPage(
+        incident_id=incident_id,
+        events=events,
+        last_event_id=high_water,
+        has_more=has_more,
+    )

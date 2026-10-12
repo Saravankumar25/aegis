@@ -14,7 +14,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from aegis.api.deps import ContainerDep, RequireViewer
+from aegis.api.deps import (
+    ContainerDep,
+    RequireViewer,
+    environment_allowed,
+    require_environment,
+)
 from aegis.core.errors import NotFoundError
 from aegis.core.logging import get_logger
 from aegis.domain.enums import ActionState
@@ -66,7 +71,7 @@ def _summarise(row: Any) -> ActionSummary:
 
 @router.get("", summary="List remediation actions")
 async def list_actions(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     incident_id: Annotated[str | None, Query()] = None,
     state: Annotated[str | None, Query()] = None,
@@ -83,20 +88,24 @@ async def list_actions(
             ) from exc
 
     if incident_id:
+        incident = await container.incidents.get(incident_id)
+        require_environment(principal, incident.environment)
         rows = await container.actions.for_incident(incident_id, limit=limit)
         if wanted is not None:
             rows = [r for r in rows if r.state is wanted]
     else:
         rows = await container.actions.recent(state=wanted, limit=limit)
+        rows = [row for row in rows if environment_allowed(principal, row.environment)]
 
     return {"items": [_summarise(r).model_dump() for r in rows], "count": len(rows)}
 
 
 @router.get("/{action_id}", summary="One action with its full decision trail")
 async def get_action(
-    action_id: str, _: RequireViewer, container: ContainerDep
+    action_id: str, principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
     action = await container.actions.require(action_id)
+    require_environment(principal, action.environment)
     decisions = await container.actions.decisions_for(action_id)
     verifications = await container.verification_store.for_action(action_id)
     approval = await container.approvals.open_for_action(action_id)
@@ -133,13 +142,14 @@ async def get_action(
             for d in decisions
         ],
         "verifications": [
-            {**v, "started_at": v["started_at"].isoformat(),
-             "completed_at": v["completed_at"].isoformat()}
+            {
+                **v,
+                "started_at": v["started_at"].isoformat(),
+                "completed_at": v["completed_at"].isoformat(),
+            }
             for v in verifications
         ],
-        "verification_claims": [
-            {**c, "observed_at": c["observed_at"].isoformat()} for c in claims
-        ],
+        "verification_claims": [{**c, "observed_at": c["observed_at"].isoformat()} for c in claims],
         "approval": (
             {
                 "id": approval.id,
@@ -152,9 +162,7 @@ async def get_action(
                     "id": granted.id,
                     "state": granted.decision,
                     "decided_by": granted.decided_by,
-                    "decided_at": granted.decided_at.isoformat()
-                    if granted.decided_at
-                    else None,
+                    "decided_at": granted.decided_at.isoformat() if granted.decided_at else None,
                     "note": granted.note,
                 }
                 if granted
@@ -177,9 +185,10 @@ async def get_action(
 
 @router.get("/{action_id}/leases", summary="Concurrency state for an action target")
 async def action_leases(
-    action_id: str, _: RequireViewer, container: ContainerDep
+    action_id: str, principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
     action = await container.actions.require(action_id)
+    require_environment(principal, action.environment)
     active = await container.leases.active(limit=200)
     mine = [
         {

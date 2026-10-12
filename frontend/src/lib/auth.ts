@@ -1,4 +1,4 @@
-import { setAuthToken } from './api';
+import { getAuthToken, setAuthToken } from './api';
 
 /**
  * Authentication for the operator console.
@@ -13,15 +13,14 @@ import { setAuthToken } from './api';
  *   production API with that flag set, so this cannot silently become the
  *   production login.
  *
- * The token is mirrored into `localStorage` so a reload does not bounce the
- * operator back to the landing page mid-incident, and into the in-memory client
- * so the very first request after sign-in already carries it.
+ * Firebase owns durable session recovery. ID tokens live only in memory and are
+ * repopulated by the Firebase observer after reload; they are never copied into
+ * script-readable browser storage.
  */
 
-export const TOKEN_KEY = 'aegis_token';
 export const IDENTITY_KEY = 'aegis_identity';
 
-export type AuthMode = 'firebase' | 'local' | 'unconfigured';
+export type AuthMode = 'firebase' | 'unconfigured';
 
 export interface Identity {
   uid: string;
@@ -71,34 +70,62 @@ export function firebaseConfig(): FirebaseWebConfig | null {
  * set - was also the one that published a "paste your dev token" form on a
  * public URL. Fail closed instead: absent configuration grants nothing.
  */
-export function isLocalEnvironment(): boolean {
-  return process.env.NEXT_PUBLIC_AEGIS_ENV === 'local';
-}
-
 /** Which sign-in methods this deployment can actually offer. */
 export function availableModes(): AuthMode[] {
-  const modes: AuthMode[] = [];
-  if (firebaseConfig()) modes.push('firebase');
-  if (isLocalEnvironment()) modes.push('local');
-  return modes.length ? modes : ['unconfigured'];
+  return firebaseConfig() ? ['firebase'] : ['unconfigured'];
+}
+
+let emulatorConnected = false;
+
+async function firebaseAuth() {
+  const config = firebaseConfig();
+  if (!config) throw new Error('Firebase is not configured for this deployment.');
+  const [{ initializeApp, getApps, getApp }, auth] = await Promise.all([
+    import('firebase/app'),
+    import('firebase/auth'),
+  ]);
+  const app = getApps().length ? getApp() : initializeApp(config);
+  const client = auth.getAuth(app);
+  const emulator = process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST;
+  if (emulator && !emulatorConnected) {
+    const origin = emulator.startsWith('http') ? emulator : `http://${emulator}`;
+    auth.connectAuthEmulator(client, origin, { disableWarnings: true });
+    emulatorConnected = true;
+  }
+  return { auth, client };
+}
+
+function identityFor(user: {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL: string | null;
+}): Identity {
+  return {
+    uid: user.uid,
+    email: user.email,
+    displayName: user.displayName,
+    photoURL: user.photoURL,
+    mode: 'firebase',
+  };
 }
 
 export function storeSession(token: string, identity: Identity): void {
   setAuthToken(token);
   try {
-    window.localStorage.setItem(TOKEN_KEY, token);
     window.localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
   } catch {
-    // Private mode or blocked storage. The in-memory token still works for
-    // this tab, so the operator is not locked out - they will simply have to
-    // sign in again after a reload.
+    // Identity is presentational only. The in-memory credential still works,
+    // and Firebase remains the authority for recovery after reload.
   }
 }
 
 export function clearSession(): void {
   setAuthToken(null);
   try {
-    window.localStorage.removeItem(TOKEN_KEY);
+    // Remove the legacy key as a one-way migration from older builds that
+    // persisted bearer tokens in script-readable storage.
+    window.localStorage.removeItem('aegis_token');
     window.localStorage.removeItem(IDENTITY_KEY);
   } catch {
     /* non-fatal */
@@ -108,11 +135,9 @@ export function clearSession(): void {
 export function readSession(): { token: string | null; identity: Identity | null } {
   if (typeof window === 'undefined') return { token: null, identity: null };
   try {
-    const token = window.localStorage.getItem(TOKEN_KEY);
     const raw = window.localStorage.getItem(IDENTITY_KEY);
     const identity = raw ? (JSON.parse(raw) as Identity) : null;
-    if (token) setAuthToken(token);
-    return { token, identity };
+    return { token: getAuthToken(), identity };
   } catch {
     return { token: null, identity: null };
   }
@@ -126,26 +151,11 @@ export function readSession(): { token: string | null; identity: Identity | null
  * an operator is only reading the marketing content.
  */
 export async function signInWithGoogle(): Promise<{ token: string; identity: Identity }> {
-  const config = firebaseConfig();
-  if (!config) {
-    throw new Error('Firebase is not configured for this deployment.');
-  }
-  const [{ initializeApp, getApps, getApp }, auth] = await Promise.all([
-    import('firebase/app'),
-    import('firebase/auth'),
-  ]);
-  const app = getApps().length ? getApp() : initializeApp(config);
+  const { auth, client } = await firebaseAuth();
   const provider = new auth.GoogleAuthProvider();
-  const client = auth.getAuth(app);
   const credential = await auth.signInWithPopup(client, provider);
   const token = await credential.user.getIdToken();
-  const identity: Identity = {
-    uid: credential.user.uid,
-    email: credential.user.email,
-    displayName: credential.user.displayName,
-    photoURL: credential.user.photoURL,
-    mode: 'firebase',
-  };
+  const identity = identityFor(credential.user);
   storeSession(token, identity);
   return { token, identity };
 }
@@ -154,61 +164,61 @@ export async function signInWithEmail(
   email: string,
   password: string,
 ): Promise<{ token: string; identity: Identity }> {
-  const config = firebaseConfig();
-  if (!config) {
-    throw new Error('Firebase is not configured for this deployment.');
-  }
-  const [{ initializeApp, getApps, getApp }, auth] = await Promise.all([
-    import('firebase/app'),
-    import('firebase/auth'),
-  ]);
-  const app = getApps().length ? getApp() : initializeApp(config);
-  const client = auth.getAuth(app);
+  const { auth, client } = await firebaseAuth();
   const credential = await auth.signInWithEmailAndPassword(client, email, password);
   const token = await credential.user.getIdToken();
-  const identity: Identity = {
-    uid: credential.user.uid,
-    email: credential.user.email,
-    displayName: credential.user.displayName,
-    photoURL: credential.user.photoURL,
-    mode: 'firebase',
-  };
+  const identity = identityFor(credential.user);
   storeSession(token, identity);
   return { token, identity };
 }
 
-/**
- * Local development sign-in.
- *
- * The operator pastes the value of `AUTH_DEV_BYPASS_TOKEN`. It is never bundled
- * into the page: shipping a working credential inside the JavaScript would make
- * the console readable by anyone who can load it, which is exactly the property
- * a bypass must not have.
- */
-export async function signInWithDevToken(
-  token: string,
+export async function signUpWithEmail(
+  email: string,
+  password: string,
 ): Promise<{ token: string; identity: Identity }> {
-  const trimmed = token.trim();
-  if (!trimmed) throw new Error('Enter the development access token.');
-  if (!isLocalEnvironment()) {
-    throw new Error('Development sign-in is only available in the local environment.');
+  const { auth, client } = await firebaseAuth();
+  const credential = await auth.createUserWithEmailAndPassword(client, email, password);
+  const token = await credential.user.getIdToken();
+  const identity = identityFor(credential.user);
+  storeSession(token, identity);
+  return { token, identity };
+}
+
+export async function sendPasswordReset(email: string): Promise<void> {
+  const { auth, client } = await firebaseAuth();
+  await auth.sendPasswordResetEmail(client, email);
+}
+
+/** Restore Firebase's persisted user and always refresh the API token. */
+export async function observeFirebaseSession(
+  onSession: (session: { token: string; identity: Identity } | null) => void,
+): Promise<() => void> {
+  if (!firebaseConfig()) {
+    clearSession();
+    onSession(null);
+    return () => {};
   }
-  const identity: Identity = {
-    uid: 'dev-user',
-    email: 'dev@localhost',
-    displayName: 'Local Developer',
-    photoURL: null,
-    mode: 'local',
-  };
-  storeSession(trimmed, identity);
-  return { token: trimmed, identity };
+  const { auth, client } = await firebaseAuth();
+  return auth.onIdTokenChanged(client, (user) => {
+    if (!user) {
+      clearSession();
+      onSession(null);
+      return;
+    }
+    void user.getIdToken().then((token) => {
+      const identity = identityFor(user);
+      storeSession(token, identity);
+      onSession({ token, identity });
+    }).catch(() => {
+      clearSession();
+      onSession(null);
+    });
+  });
 }
 
 /** Sign out of Firebase too, so the next sign-in is a real one. */
 export async function signOut(): Promise<void> {
-  const identity = readSession().identity;
   clearSession();
-  if (identity?.mode !== 'firebase') return;
   try {
     const [{ getApps, getApp }, auth] = await Promise.all([
       import('firebase/app'),

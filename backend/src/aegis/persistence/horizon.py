@@ -362,15 +362,17 @@ class PostgresHorizonStore:
         )
         return path
 
-    async def get_incident_map(self, card_id: str) -> tuple[bytes, str] | None:
+    async def get_incident_map(self, card_id: str) -> tuple[bytes, str, str] | None:
         if not _CARD_ID_RE.match(card_id):
             return None
         row = await self._db.fetchrow(
-            "SELECT image, image_mime FROM horizon_memory_cards WHERE id = $1", card_id
+            "SELECT image, image_mime, incident_id "
+            "FROM horizon_memory_cards WHERE id = $1",
+            card_id,
         )
         if row is None or row["image"] is None or row["image_mime"] not in INCIDENT_MAP_MIMES:
             return None
-        return bytes(row["image"]), str(row["image_mime"])
+        return bytes(row["image"]), str(row["image_mime"]), str(row["incident_id"])
 
 
 __all__ = [

@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, Inbox, Loader2, PlugZap, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Inbox, Loader2, LockKeyhole, PlugZap, RefreshCw } from 'lucide-react';
 import { ApiError, NetworkError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -112,6 +112,37 @@ export function ErrorState({
   );
 }
 
+/** A valid response that the signed-in identity is not authorised to view. */
+export function PermissionState({
+  resource,
+  requiredRole,
+  action,
+}: {
+  resource: string;
+  requiredRole?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="card p-5" role="status">
+      <div className="flex items-start gap-3">
+        <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0 text-ink-tertiary" aria-hidden />
+        <div className="space-y-1.5">
+          <p className="text-body font-medium text-ink-primary">Access required</p>
+          <p className="text-meta text-ink-secondary">
+            Your current role cannot view {resource}.
+          </p>
+          <p className="text-meta text-ink-tertiary">
+            {requiredRole
+              ? `Ask a workspace administrator for the ${requiredRole} role.`
+              : 'Ask a workspace administrator to review your access.'}
+          </p>
+          {action ? <div className="pt-1">{action}</div> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * A failed query, rendered as what actually happened to it.
  *
@@ -158,6 +189,10 @@ export function QueryFailure({
         onRetry={onRetry}
       />
     );
+  }
+
+  if (error instanceof ApiError && error.status === 403) {
+    return <PermissionState resource={source.toLowerCase()} />;
   }
 
   // Status, code and correlation id are what an operator quotes to whoever

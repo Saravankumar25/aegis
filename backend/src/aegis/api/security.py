@@ -13,6 +13,7 @@ a production rollback. Firebase never grants Aegis authority.
 from __future__ import annotations
 
 import hmac
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -24,10 +25,10 @@ log = get_logger(__name__)
 
 
 class Role(StrEnum):
-    VIEWER = "viewer"        # read incidents and evidence
+    VIEWER = "viewer"  # read incidents and evidence
     RESPONDER = "responder"  # run investigations, comment
-    APPROVER = "approver"    # approve tier-2 actions
-    ADMIN = "admin"          # policy, kill switch, integrations
+    APPROVER = "approver"  # approve tier-2 actions
+    ADMIN = "admin"  # policy, kill switch, integrations
 
     @property
     def implied(self) -> frozenset[str]:
@@ -47,6 +48,8 @@ class Principal:
     email: str
     roles: frozenset[str]
     display_name: str = ""
+    tenant_id: str = ""
+    environments: frozenset[str] = frozenset()
 
     def has(self, role: Role) -> bool:
         return role.value in self.effective_roles
@@ -82,19 +85,22 @@ class FirebaseVerifier:
             return True
         path = self._settings.firebase_service_account_path
         project = self._settings.firebase_project_id
-        if not path or not project:
+        emulator = self._settings.firebase_auth_emulator_host.strip()
+        if not project or (not path and not emulator):
             log.warning("firebase not configured; token verification unavailable")
             return False
         try:
             import firebase_admin
             from firebase_admin import credentials
 
+            if emulator:
+                os.environ.setdefault("FIREBASE_AUTH_EMULATOR_HOST", emulator)
+
             if firebase_admin._apps:  # noqa: SLF001 - library exposes no public check
                 self._app = firebase_admin.get_app()
             else:
-                self._app = firebase_admin.initialize_app(
-                    credentials.Certificate(path), {"projectId": project}
-                )
+                credential = None if emulator else credentials.Certificate(path)
+                self._app = firebase_admin.initialize_app(credential, {"projectId": project})
             self._ready = True
             log.info("firebase verifier ready", project_id=project)
         except Exception as exc:  # noqa: BLE001 - never fatal at boot
@@ -108,8 +114,9 @@ class FirebaseVerifier:
 
     def verify(self, id_token: str) -> Principal:
         if not self._ready and not self.initialise():
-            raise AuthenticationError("identity provider unavailable",
-                                      code="AUTH_PROVIDER_UNAVAILABLE")
+            raise AuthenticationError(
+                "identity provider unavailable", code="AUTH_PROVIDER_UNAVAILABLE"
+            )
         try:
             from firebase_admin import auth as fb_auth
 
@@ -119,12 +126,20 @@ class FirebaseVerifier:
 
         # Roles come from Aegis, carried as a custom claim set by an admin.
         # A token cannot mint its own authority.
-        raw_roles = claims.get("aegis_roles") or [Role.VIEWER.value]
+        raw_roles = claims.get("aegis_roles") or []
+        raw_environments = claims.get("aegis_environments") or []
+        if self._settings.firebase_auth_emulator_host and not raw_environments:
+            raw_environments = [self._settings.aegis_environment_name]
+        tenant_id = str(claims.get("aegis_tenant_id", ""))
+        if self._settings.firebase_auth_emulator_host and not tenant_id:
+            tenant_id = self._settings.aegis_tenant_id
         return Principal(
             uid=claims["uid"],
             email=claims.get("email", ""),
             roles=frozenset(raw_roles),
             display_name=claims.get("name", ""),
+            tenant_id=tenant_id,
+            environments=frozenset(str(v) for v in raw_environments),
         )
 
 
@@ -135,7 +150,6 @@ def verify_ingest_token(supplied: str | None, settings: Settings) -> None:
     """
     expected = settings.alert_ingest_token.get_secret_value()
     if not expected:
-        raise AuthenticationError("ingestion token is not configured",
-                                  code="INGEST_TOKEN_UNSET")
+        raise AuthenticationError("ingestion token is not configured", code="INGEST_TOKEN_UNSET")
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise AuthenticationError("invalid ingestion token")

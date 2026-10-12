@@ -24,7 +24,14 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from aegis.agents.horizon.ports import HorizonStore
-from aegis.api.deps import RequireAdmin, RequireResponder, RequireViewer, settings_dep
+from aegis.api.deps import (
+    RequireAdmin,
+    RequireResponder,
+    RequireViewer,
+    environment_allowed,
+    require_environment,
+    settings_dep,
+)
 from aegis.api.security import Principal
 from aegis.api.war_room_events import parse_last_event_id, publish_control, war_room_stream
 from aegis.core.config import Environment, Settings
@@ -85,7 +92,7 @@ class WarRoomStore(HorizonStore, Protocol):
 
     async def last_seq(self, incident_id: str | None = None) -> int: ...
 
-    async def get_incident_map(self, card_id: str) -> tuple[bytes, str] | None: ...
+    async def get_incident_map(self, card_id: str) -> tuple[bytes, str, str] | None: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -261,8 +268,8 @@ class HealthProbe:
         *,
         pool_only: bool = False,
     ) -> dict[str, Any]:
-        reached = pool.available if pool_only else (
-            p99.available or err.available or pool.available
+        reached = (
+            pool.available if pool_only else (p99.available or err.available or pool.available)
         )
         if not reached:
             return HealthProbe._unavailable_card(service, version)
@@ -303,9 +310,7 @@ class HealthProbe:
     def _unavailable(self) -> dict[str, Any]:
         return {
             "ts": datetime.now(UTC).isoformat(),
-            "services": [
-                self._unavailable_card(s, None) for s in (*SERVICES, POOL_CARD)
-            ],
+            "services": [self._unavailable_card(s, None) for s in (*SERVICES, POOL_CARD)],
         }
 
 
@@ -382,8 +387,13 @@ def _brain_status(request: Request) -> dict[str, Any]:
 def _stats(run: HorizonState | None) -> dict[str, Any]:
     if run is None:
         return {
-            "compression_ratio": 0.0, "cache_hits": 0, "cache_read_tokens": 0,
-            "fallbacks_used": 0, "steps": 0, "context_tokens": 0, "naive_tokens": 0,
+            "compression_ratio": 0.0,
+            "cache_hits": 0,
+            "cache_read_tokens": 0,
+            "fallbacks_used": 0,
+            "steps": 0,
+            "context_tokens": 0,
+            "naive_tokens": 0,
         }
     t = run.tokens
     ratio = (
@@ -422,10 +432,22 @@ async def _incident(request: Request, run: HorizonState | None) -> dict[str, Any
 
 
 async def build_state(
-    request: Request, settings: Settings, store: WarRoomStore
+    request: Request, settings: Settings, store: WarRoomStore, principal: Principal
 ) -> dict[str, Any]:
     run = await store.latest_run()
     cards: list[MemoryCard] = await store.memory_cards(limit=20)
+    if run is not None:
+        incident = await request.app.state.incidents.get(run.incident_id)
+        require_environment(principal, incident.environment)
+    card_environments = await request.app.state.incidents.environments_for(
+        [card.incident_id for card in cards]
+    )
+    cards = [
+        card
+        for card in cards
+        if card.incident_id in card_environments
+        and environment_allowed(principal, card_environments[card.incident_id])
+    ]
     return {
         "mode": settings.aegis_mode,
         "run": run.model_dump(mode="json") if run is not None else None,
@@ -446,6 +468,19 @@ async def _scope(store: WarRoomStore, incident_id: str | None) -> str | None:
     return run.incident_id if run is not None else None
 
 
+async def _authorized_scope(
+    request: Request,
+    principal: Principal,
+    store: WarRoomStore,
+    incident_id: str | None,
+) -> str | None:
+    scope = await _scope(store, incident_id)
+    if scope is not None:
+        incident = await request.app.state.incidents.get(scope)
+        require_environment(principal, incident.environment)
+    return scope
+
+
 # --------------------------------------------------------------------------- #
 # reads                                                                        #
 # --------------------------------------------------------------------------- #
@@ -453,20 +488,21 @@ async def _scope(store: WarRoomStore, incident_id: str | None) -> str | None:
 
 @router.get("/state", summary="War-room snapshot")
 async def state(
-    request: Request, _: RequireViewer, settings: SettingsDep, store: StoreDep
+    request: Request, principal: RequireViewer, settings: SettingsDep, store: StoreDep
 ) -> dict[str, Any]:
-    return await build_state(request, settings, store)
+    return await build_state(request, settings, store, principal)
 
 
 @router.get("/events", summary="Horizon events after a sequence number")
 async def events(
-    _: RequireViewer,
+    request: Request,
+    principal: RequireViewer,
     store: StoreDep,
     incident_id: Annotated[str | None, Query(max_length=64)] = None,
     after: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ) -> dict[str, Any]:
-    scope = await _scope(store, incident_id)
+    scope = await _authorized_scope(request, principal, store, incident_id)
     if scope is None:
         return {"events": []}
     rows = await store.events(scope, after_seq=after, limit=limit)
@@ -475,11 +511,12 @@ async def events(
 
 @router.get("/context-series", summary="Context vs naive tokens per step")
 async def context_series(
-    _: RequireViewer,
+    request: Request,
+    principal: RequireViewer,
     store: StoreDep,
     incident_id: Annotated[str | None, Query(max_length=64)] = None,
 ) -> dict[str, Any]:
-    scope = await _scope(store, incident_id)
+    scope = await _authorized_scope(request, principal, store, incident_id)
     return {"points": await store.context_series(scope) if scope else []}
 
 
@@ -490,11 +527,12 @@ async def health(_: RequireViewer, probe: ProbeDep) -> dict[str, Any]:
 
 @router.get("/rawtree-queries", summary="RawTree queries the agent and heartbeat ran")
 async def rawtree_queries(
-    _: RequireViewer,
+    request: Request,
+    principal: RequireViewer,
     store: StoreDep,
     incident_id: Annotated[str | None, Query(max_length=64)] = None,
 ) -> dict[str, Any]:
-    scope = await _scope(store, incident_id)
+    scope = await _authorized_scope(request, principal, store, incident_id)
     if scope is None:
         return {"queries": []}
     rows = await store.events_of_type(scope, HorizonEventType.RAWTREE_QUERY, limit=100)
@@ -521,11 +559,18 @@ async def rawtree_queries(
     summary="A memory card's incident map image",
     response_class=Response,
 )
-async def incident_map(card_id: str, _: RequireViewer, store: StoreDep) -> Response:
+async def incident_map(
+    card_id: str,
+    principal: RequireViewer,
+    store: StoreDep,
+    request: Request,
+) -> Response:
     found = await store.get_incident_map(card_id)
     if found is None:
         raise NotFoundError("no incident map for this card", context={"card_id": card_id[:64]})
-    image, mime = found
+    image, mime, incident_id = found
+    incident = await request.app.state.incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     return Response(
         content=image,
         media_type=mime,
@@ -536,17 +581,17 @@ async def incident_map(card_id: str, _: RequireViewer, store: StoreDep) -> Respo
 @router.get("/stream", summary="Live war-room stream (SSE)")
 async def stream(
     request: Request,
-    _: RequireViewer,
+    principal: RequireViewer,
     settings: SettingsDep,
     store: StoreDep,
     probe: ProbeDep,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> EventSourceResponse:
     async def snapshot() -> dict[str, Any]:
-        return await build_state(request, settings, store)
+        return await build_state(request, settings, store, principal)
 
     async def replay(after: int, limit: int) -> list[dict[str, Any]]:
-        scope = await _scope(store, None)
+        scope = await _authorized_scope(request, principal, store, None)
         if scope is None:
             return []
         rows = await store.events(scope, after_seq=after, limit=limit)
@@ -606,7 +651,9 @@ class WorkloadAdmin:
 
         try:
             status = await guarded_call(
-                _post, dependency=f"workload-admin-{service}", timeout_s=ADMIN_TIMEOUT_S,
+                _post,
+                dependency=f"workload-admin-{service}",
+                timeout_s=ADMIN_TIMEOUT_S,
                 attempts=2,
             )
         except Exception as exc:  # noqa: BLE001 - reported to the operator, not raised
@@ -705,8 +752,11 @@ async def inject(
         request, settings, principal, version=BAD_VERSION, kind="deploy"
     )
     log.warning("war-room fault injected", scenario=body.scenario, ok=ok, actor=principal.uid)
-    return {"ok": ok, "detail": f"[fault injection {body.scenario}] {detail}",
-            "deployment_id": deployment_id}
+    return {
+        "ok": ok,
+        "detail": f"[fault injection {body.scenario}] {detail}",
+        "deployment_id": deployment_id,
+    }
 
 
 @router.post("/reset", summary="Return the demo workload to its healthy build")
@@ -726,8 +776,10 @@ async def reset(
     admin = _workload_admin(request, settings)
     cleared = await asyncio.gather(*(admin.clear_fault(s) for s in SERVICES))
     failed = [s for s, done in zip(SERVICES, cleared, strict=True) if not done]
-    parts.append(f"fault cleared on {len(SERVICES) - len(failed)}/{len(SERVICES)} services"
-                 + (f" (failed: {', '.join(failed)})" if failed else ""))
+    parts.append(
+        f"fault cleared on {len(SERVICES) - len(failed)}/{len(SERVICES)} services"
+        + (f" (failed: {', '.join(failed)})" if failed else "")
+    )
     ok = ok and not failed
 
     run = await store.latest_run()
@@ -739,9 +791,7 @@ async def reset(
 
 
 @router.post("/kill-worker", summary="Crash the worker to demonstrate resume")
-async def kill_worker(
-    request: Request, _: RequireAdmin, settings: SettingsDep
-) -> dict[str, Any]:
+async def kill_worker(request: Request, _: RequireAdmin, settings: SettingsDep) -> dict[str, Any]:
     _require_local(settings, "kill-worker")
     redis = _redis(request)
     if redis is None:

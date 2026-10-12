@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Beaker } from 'lucide-react';
 import { api } from '@/lib/api';
 import { SeverityBadge, StateChip } from '@/components/ui/primitives';
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/ui/states';
@@ -45,6 +45,19 @@ export default function HomePage() {
         <h1 className="text-h2 font-medium tracking-tight">Operations</h1>
         <p className="mt-1 text-body text-ink-secondary">{subtitle}</p>
       </header>
+
+      <aside className="mb-6 flex flex-col gap-3 border-y border-hairline py-4 sm:flex-row sm:items-center sm:justify-between" aria-label="First-run exploration">
+        <div className="flex items-start gap-3">
+          <Beaker className="mt-0.5 h-4 w-4 text-status-info" aria-hidden />
+          <div>
+            <p className="text-body font-medium">New to Aegis?</p>
+            <p className="text-meta text-ink-secondary">Explore an isolated deterministic incident before opening live data.</p>
+          </div>
+        </div>
+        <Link href="/explore" className="inline-flex items-center gap-1.5 text-body text-status-info hover:text-ink-primary">
+          Open sample environment <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+        </Link>
+      </aside>
 
       <div className="grid gap-5 lg:grid-cols-[1fr_300px]">
         <section aria-labelledby="active-incidents">

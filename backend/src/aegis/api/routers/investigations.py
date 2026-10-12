@@ -16,7 +16,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, DbDep, RequireViewer
+from aegis.api.deps import (
+    ContainerDep,
+    DbDep,
+    IncidentsDep,
+    RequireViewer,
+    require_environment,
+)
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -25,10 +31,11 @@ router = APIRouter(prefix="/investigations", tags=["investigations"])
 
 @router.get("", summary="Recent investigation runs")
 async def list_investigations(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     rows = await db.fetch(
         """
         SELECT i.id                AS incident_id,
@@ -45,11 +52,13 @@ async def list_investigations(
                coalesce(sum(r.duration_ms), 0)               AS total_duration_ms
           FROM incidents i
           LEFT JOIN agent_runs r ON r.incident_id = i.id
+         WHERE ($2::text[] IS NULL OR i.environment = ANY($2))
          GROUP BY i.id
          ORDER BY i.created_at DESC
          LIMIT $1
         """,
         min(limit, 200),
+        allowed,
     )
     return {
         "items": [
@@ -64,9 +73,7 @@ async def list_investigations(
                 "failed_runs": int(r["failed_runs"]),
                 "total_duration_ms": int(r["total_duration_ms"]),
                 "created_at": r["created_at"].isoformat(),
-                "last_activity": (
-                    r["last_activity"].isoformat() if r["last_activity"] else None
-                ),
+                "last_activity": (r["last_activity"].isoformat() if r["last_activity"] else None),
             }
             for r in rows
         ],
@@ -77,9 +84,12 @@ async def list_investigations(
 @router.get("/{incident_id}/runs", summary="Agent runs for one incident")
 async def agent_runs(
     incident_id: str,
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
+    incidents: IncidentsDep,
 ) -> dict[str, Any]:
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     rows = await db.fetch(
         """
         SELECT id, agent_role, status, model, provider, prompt_version, task,
@@ -119,10 +129,13 @@ async def agent_runs(
 @router.get("/{incident_id}/tools", summary="Tool calls for one incident")
 async def tool_calls(
     incident_id: str,
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
+    incidents: IncidentsDep,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict[str, Any]:
+    incident = await incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     rows = await db.fetch(
         """
         SELECT id, agent_run_id, tool_name, status, duration_ms,
@@ -132,7 +145,8 @@ async def tool_calls(
          ORDER BY created_at ASC
          LIMIT $2
         """,
-        incident_id, min(limit, 500),
+        incident_id,
+        min(limit, 500),
     )
     return {
         "incident_id": incident_id,
@@ -156,7 +170,7 @@ async def tool_calls(
 @router.get("/{incident_id}/gaps", summary="Sources that could not be consulted")
 async def evidence_gaps(
     incident_id: str,
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
 ) -> dict[str, Any]:
     """Gaps are a first-class result, not an absence.
@@ -164,6 +178,8 @@ async def evidence_gaps(
     "Prometheus was unreachable" and "no latency anomaly exists" are opposite
     conclusions, and this endpoint exists so the UI can never conflate them.
     """
+    incident = await container.incidents.get(incident_id)
+    require_environment(principal, incident.environment)
     items = await container.evidence.list_for_incident(incident_id, limit=500)
     gaps = [e for e in items if e.is_gap]
     return {

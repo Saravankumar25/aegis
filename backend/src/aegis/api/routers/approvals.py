@@ -19,7 +19,13 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from aegis.api.deps import ContainerDep, RequireApprover, RequireViewer
+from aegis.api.deps import (
+    ContainerDep,
+    RequireApprover,
+    RequireViewer,
+    environment_allowed,
+    require_environment,
+)
 from aegis.core.errors import NotFoundError
 from aegis.core.logging import get_logger
 from aegis.persistence.jobs import JobQueue
@@ -36,13 +42,15 @@ class DecisionRequest(BaseModel):
 
 @router.get("", summary="Open approval requests with full decision context")
 async def pending(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
     rows = await container.approvals.pending(limit=limit)
     items: list[dict[str, Any]] = []
     for row in rows:
+        if not environment_allowed(principal, str(row["environment"])):
+            continue
         profile = profile_for_safe(row["action_type"])
         items.append(
             {
@@ -97,11 +105,13 @@ def profile_for_safe(action_type: str) -> int:
 
 @router.get("/{approval_id}", summary="One approval request")
 async def get_approval(
-    approval_id: str, _: RequireViewer, container: ContainerDep
+    approval_id: str, principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
     approval = await container.approvals.get(approval_id)
     if approval is None:
         raise NotFoundError("approval not found", context={"approval_id": approval_id})
+    incident = await container.incidents.get(approval.incident_id)
+    require_environment(principal, incident.environment)
     return {
         "id": approval.id,
         "action_id": approval.action_id,
@@ -130,6 +140,12 @@ async def decide(
     full gate chain: the approval authorises the action, it does not bypass the
     checks that were never about authorisation in the first place.
     """
+    existing = await container.approvals.get(approval_id)
+    if existing is None:
+        raise NotFoundError("approval not found", context={"approval_id": approval_id})
+    incident = await container.incidents.get(existing.incident_id)
+    require_environment(principal, incident.environment)
+
     approval = await container.approvals.decide(
         approval_id,
         decision=body.decision,  # type: ignore[arg-type]

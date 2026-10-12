@@ -1,21 +1,19 @@
 'use client';
 
-import { ArrowRight, KeyRound, Loader2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
   hasFirebase: boolean;
-  hasLocal: boolean;
-  busy: null | 'google' | 'email' | 'dev';
+  mode: 'sign-in' | 'sign-up' | 'reset';
+  busy: null | 'google' | 'email' | 'reset';
   email: string;
   password: string;
-  devToken: string;
   onEmailChange: (value: string) => void;
   onPasswordChange: (value: string) => void;
-  onDevTokenChange: (value: string) => void;
   onGoogle: () => void;
   onEmail: () => void;
-  onDev: () => void;
+  onModeChange: (mode: 'sign-in' | 'sign-up' | 'reset') => void;
 }
 
 const FIELD =
@@ -36,8 +34,8 @@ const FIELD =
  */
 export function SignInForms(props: Props) {
   const {
-    hasFirebase, hasLocal, busy, email, password, devToken,
-    onEmailChange, onPasswordChange, onDevTokenChange, onGoogle, onEmail, onDev,
+    hasFirebase, mode, busy, email, password,
+    onEmailChange, onPasswordChange, onGoogle, onEmail, onModeChange,
   } = props;
   const anyBusy = busy !== null;
 
@@ -45,32 +43,34 @@ export function SignInForms(props: Props) {
     <div className="space-y-5">
       {hasFirebase && (
         <>
-          <button
-            type="button"
-            onClick={onGoogle}
-            disabled={anyBusy}
-            className={cn(
-              'flex h-11 w-full items-center justify-center gap-2.5 rounded-btn border',
-              'border-line bg-surface-2 text-body font-semibold text-ink-primary',
-              'transition-colors duration-hover hover:bg-surface-3',
-              'disabled:cursor-not-allowed disabled:opacity-50',
-            )}
-          >
-            {busy === 'google' ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <GoogleMark />
-            )}
-            Continue with Google
-          </button>
+          {mode !== 'reset' && (
+            <button
+              type="button"
+              onClick={onGoogle}
+              disabled={anyBusy}
+              className={cn(
+                'flex h-11 w-full items-center justify-center gap-2.5 rounded-btn border',
+                'border-line bg-surface-2 text-body font-semibold text-ink-primary',
+                'transition-colors duration-hover hover:bg-surface-3',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+              )}
+            >
+              {busy === 'google' ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <GoogleMark />
+              )}
+              Continue with Google
+            </button>
+          )}
 
-          <div className="flex items-center gap-3">
+          {mode !== 'reset' && <div className="flex items-center gap-3">
             <span className="h-px flex-1 bg-hairline" />
             <span className="text-meta font-semibold uppercase tracking-wider text-ink-tertiary">
               or
             </span>
             <span className="h-px flex-1 bg-hairline" />
-          </div>
+          </div>}
 
           <form
             className="space-y-3"
@@ -95,7 +95,7 @@ export function SignInForms(props: Props) {
                 className={FIELD}
               />
             </div>
-            <div className="space-y-1.5">
+            {mode !== 'reset' && <div className="space-y-1.5">
               <label
                 htmlFor="password"
                 className="block text-meta font-semibold text-ink-secondary"
@@ -106,14 +106,14 @@ export function SignInForms(props: Props) {
                 id="password"
                 type="password"
                 required
-                autoComplete="current-password"
+                autoComplete={mode === 'sign-up' ? 'new-password' : 'current-password'}
                 value={password}
                 disabled={anyBusy}
                 onChange={(e) => onPasswordChange(e.target.value)}
                 placeholder="••••••••••••"
                 className={FIELD}
               />
-            </div>
+            </div>}
             <button
               type="submit"
               disabled={anyBusy}
@@ -124,60 +124,27 @@ export function SignInForms(props: Props) {
                 'disabled:cursor-not-allowed disabled:opacity-50',
               )}
             >
-              {busy === 'email' ? (
+              {busy === 'email' || busy === 'reset' ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
               ) : (
                 <ArrowRight className="h-4 w-4" aria-hidden />
               )}
-              Continue
+              {mode === 'sign-up' ? 'Create account' : mode === 'reset' ? 'Send reset link' : 'Continue'}
             </button>
+            <div className="flex justify-between gap-3 text-meta font-semibold">
+              {mode === 'sign-in' ? (
+                <>
+                  <button type="button" onClick={() => onModeChange('sign-up')} disabled={anyBusy} className="text-ink-secondary hover:text-ink-primary">Create account</button>
+                  <button type="button" onClick={() => onModeChange('reset')} disabled={anyBusy} className="text-ink-secondary hover:text-ink-primary">Forgot password?</button>
+                </>
+              ) : (
+                <button type="button" onClick={() => onModeChange('sign-in')} disabled={anyBusy} className="inline-flex items-center gap-1 text-ink-secondary hover:text-ink-primary">
+                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Back to sign in
+                </button>
+              )}
+            </div>
           </form>
         </>
-      )}
-
-      {hasLocal && (
-        <form
-          className="space-y-3 rounded-card border border-hairline bg-surface-1 p-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onDev();
-          }}
-        >
-          <div className="flex items-center gap-2">
-            <KeyRound className="h-3.5 w-3.5 text-ink-tertiary" aria-hidden />
-            <span className="text-meta font-semibold uppercase tracking-wider text-ink-tertiary">
-              Local development
-            </span>
-          </div>
-          <p className="text-meta font-medium leading-relaxed text-ink-tertiary">
-            Paste <code className="font-mono text-ink-secondary">AUTH_DEV_BYPASS_TOKEN</code> from
-            your <code className="font-mono text-ink-secondary">.env</code>. This is refused
-            outright in production.
-          </p>
-          <input
-            id="dev-token"
-            type="password"
-            value={devToken}
-            disabled={anyBusy}
-            onChange={(e) => onDevTokenChange(e.target.value)}
-            placeholder="Development access token"
-            aria-label="Development access token"
-            className={cn(FIELD, 'font-mono')}
-          />
-          <button
-            type="submit"
-            disabled={anyBusy}
-            className={cn(
-              'flex h-10 w-full items-center justify-center gap-2 rounded-btn border',
-              'border-line bg-surface-2 text-body font-semibold text-ink-primary',
-              'transition-colors duration-hover hover:bg-surface-3',
-              'disabled:cursor-not-allowed disabled:opacity-50',
-            )}
-          >
-            {busy === 'dev' && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-            Enter console
-          </button>
-        </form>
       )}
     </div>
   );

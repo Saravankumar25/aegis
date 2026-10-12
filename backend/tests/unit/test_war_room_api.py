@@ -101,7 +101,9 @@ class FakeStore:
         ]
         self.cards = [MemoryCard(id="mem_1", incident_id="INC-042", symptoms="pool",
                                  root_cause="leak")]
-        self.maps: dict[str, tuple[bytes, str]] = {"mem_1": (b"\xff\xd8jpeg", "image/jpeg")}
+        self.maps: dict[str, tuple[bytes, str, str]] = {
+            "mem_1": (b"\xff\xd8jpeg", "image/jpeg", "INC-042")
+        }
         self.idled: list[str] = []
 
     async def latest_run(self) -> HorizonState | None:
@@ -134,7 +136,7 @@ class FakeStore:
     async def memory_cards(self, *, limit: int = 20) -> list[MemoryCard]:
         return self.cards[:limit]
 
-    async def get_incident_map(self, card_id: str) -> tuple[bytes, str] | None:
+    async def get_incident_map(self, card_id: str) -> tuple[bytes, str, str] | None:
         return self.maps.get(card_id)
 
 
@@ -208,9 +210,17 @@ class FakeDeployments:
 
 
 class FakeIncidents:
+    def __init__(self) -> None:
+        self.environments: dict[str, str] = {}
+
     async def get(self, incident_id: str) -> Any:
         return SimpleNamespace(id=incident_id, title="checkout p99 regression",
-                               severity="P2", state="DIAGNOSING")
+                               severity="P2", state="DIAGNOSING",
+                               environment=self.environments.get(incident_id, "local-docker"))
+
+    async def environments_for(self, incident_ids: list[str]) -> dict[str, str]:
+        return {incident_id: self.environments.get(incident_id, "local-docker")
+                for incident_id in incident_ids}
 
 
 class FakeWorkloadAdmin:
@@ -290,7 +300,8 @@ def build_app(
         return JSONResponse(status_code=exc.http_status, content={"error": exc.to_dict()})
 
     async def _principal() -> Principal:
-        return Principal(uid="uid_op", email="op@example.com", roles=frozenset({role.value}))
+        return Principal(uid="uid_op", email="op@example.com", roles=frozenset({role.value}),
+                         environments=frozenset({settings.aegis_environment_name}))
 
     settings = _settings(env)
     app.dependency_overrides[current_principal] = _principal
@@ -302,6 +313,7 @@ def build_app(
         incidents=FakeIncidents(),
     )
     app.state.container = container
+    app.state.incidents = container.incidents
     if with_store:
         app.state.horizon_store = store or FakeStore()
     app.state.redis = redis
@@ -393,6 +405,19 @@ def test_incident_map_serves_stored_bytes_and_404s_otherwise() -> None:
     assert found.headers["x-content-type-options"] == "nosniff"
     assert found.content == b"\xff\xd8jpeg"
     assert missing.status_code == 404
+
+
+def test_incident_map_denies_a_card_from_another_environment() -> None:
+    store = FakeStore()
+    store.maps["mem_other"] = (b"other", "image/png", "INC-OTHER")
+    app, container = build_app(store=store)
+    container.incidents.environments["INC-OTHER"] = "production"
+
+    with TestClient(app) as client:
+        denied = client.get("/v1/war-room/incident-maps/mem_other")
+
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "FORBIDDEN"
 
 
 # --------------------------------------------------------------------------- #

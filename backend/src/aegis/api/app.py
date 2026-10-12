@@ -14,12 +14,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, ORJSONResponse
 
 from aegis.api.metrics import install_metrics
 from aegis.api.routers import (
+    access,
     actions,
     alerts,
     approvals,
@@ -40,7 +42,7 @@ from aegis.api.routers import (
 )
 from aegis.container import build_container
 from aegis.core.config import Settings, get_settings
-from aegis.core.errors import AegisError
+from aegis.core.errors import AegisError, DatabaseResuming
 from aegis.core.ids import correlation_id
 from aegis.core.logging import bind_correlation_id, configure_logging, get_logger
 from aegis.persistence.migrate import run_migrations
@@ -64,9 +66,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # own components is how an API ends up enforcing a different policy from
     # the worker that actually executes.
     container = build_container(settings)
-    await container.connect()
-    await run_migrations(container.db)
-
     app.state.settings = settings
     app.state.container = container
     app.state.db = container.db
@@ -78,15 +77,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.horizon_store = container.horizon_store
     app.state.brain = container.brain
 
+    try:
+        await container.connect()
+    except DatabaseResuming:
+        if settings.api_runtime != "lambda":
+            raise
+        log.warning("database is resuming; Lambda will retry on the next request")
+    if settings.api_run_migrations:
+        await run_migrations(container.db)
+
     from aegis.api.security import FirebaseVerifier
 
     verifier = FirebaseVerifier(settings)
     verifier.initialise()  # best effort; /health reports the outcome
     app.state.verifier = verifier
 
-    unavailable = [
-        name for name, cap in container.capabilities.items() if not cap.configured
-    ]
+    unavailable = [name for name, cap in container.capabilities.items() if not cap.configured]
     log.info(
         "aegis api ready",
         capabilities_available=len(container.capabilities) - len(unavailable),
@@ -118,8 +124,7 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Aegis-Ingest-Token",
-                       "Last-Event-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Aegis-Ingest-Token", "Last-Event-ID"],
         max_age=600,
     )
 
@@ -134,7 +139,29 @@ def create_app() -> FastAPI:
         bind_correlation_id(cid)
         request.state.correlation_id = cid
         try:
-            response = await call_next(request)
+            if settings.api_runtime == "lambda" and not request.app.state.db.is_ready:
+                try:
+                    await request.app.state.container.connect()
+                except DatabaseResuming as resume_error:
+                    response = _database_resuming_response(request, resume_error, settings)
+                else:
+                    response = await call_next(request)
+            else:
+                response = await call_next(request)
+        except (
+            asyncpg.CannotConnectNowError,
+            asyncpg.ConnectionDoesNotExistError,
+            asyncpg.PostgresConnectionError,
+            asyncpg.TooManyConnectionsError,
+            ConnectionError,
+            TimeoutError,
+        ) as cause:
+            database_unavailable = DatabaseResuming(
+                "database is resuming; retry after the advertised delay",
+                context={"dependency": "postgres"},
+            )
+            log.warning("database request unavailable", error=type(cause).__name__)
+            response = _database_resuming_response(request, database_unavailable, settings)
         finally:
             bind_correlation_id(None)
         response.headers["X-Correlation-ID"] = cid
@@ -156,10 +183,13 @@ def create_app() -> FastAPI:
             status=exc.http_status,
             error=exc.message,
         )
+        headers = {"X-Correlation-ID": cid}
+        if isinstance(exc, DatabaseResuming):
+            headers["Retry-After"] = str(settings.database_resume_retry_after_s)
         return JSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict(), "correlation_id": cid},
-            headers={"X-Correlation-ID": cid},
+            headers=headers,
         )
 
     @app.exception_handler(Exception)
@@ -176,9 +206,23 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     for module in (
-        alerts, incidents, stream, policy_admin, actions, approvals, audit,
-        deployments, evaluation, graph, integrations, investigations, reliability,
-        systems, tasks, war_room,
+        access,
+        alerts,
+        incidents,
+        stream,
+        policy_admin,
+        actions,
+        approvals,
+        audit,
+        deployments,
+        evaluation,
+        graph,
+        integrations,
+        investigations,
+        reliability,
+        systems,
+        tasks,
+        war_room,
     ):
         app.include_router(module.router, prefix="/v1")
     # Last: the health router already serves /metrics, and installing after it
@@ -197,3 +241,22 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def _database_resuming_response(
+    request: Request, exc: DatabaseResuming, settings: Settings
+) -> JSONResponse:
+    """Stable cold-resume contract; an unavailable database is never empty success."""
+    cid = getattr(request.state, "correlation_id", "")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": exc.to_dict(),
+            "correlation_id": cid,
+            "retry_after_seconds": settings.database_resume_retry_after_s,
+        },
+        headers={
+            "Retry-After": str(settings.database_resume_retry_after_s),
+            "X-Correlation-ID": cid,
+        },
+    )

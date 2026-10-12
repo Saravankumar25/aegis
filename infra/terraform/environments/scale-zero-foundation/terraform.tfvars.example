@@ -1,0 +1,15 @@
+aws_region         = "us-east-1"
+availability_zones = ["us-east-1a", "us-east-1b"]
+environment        = "staging-zero"
+
+github_repository        = "example/aegis"
+github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+terraform_state_bucket_arn = "arn:aws:s3:::example-terraform-state"
+terraform_lock_table_arn   = "arn:aws:dynamodb:us-east-1:123456789012:table/example-terraform-lock"
+
+aurora_engine_version    = "16.4"
+aurora_min_acu           = 0
+aurora_max_acu           = 2
+aurora_auto_pause_seconds = 900
+deletion_protection      = true
+artifact_retention_days  = 365

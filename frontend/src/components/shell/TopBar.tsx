@@ -4,12 +4,13 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import {
-  ChevronRight, Command, HelpCircle, LogOut, ShieldAlert, ShieldCheck, ShieldQuestion,
+  ChevronRight, Command, HelpCircle, LogOut, Menu, ShieldAlert, ShieldCheck, ShieldQuestion,
 } from 'lucide-react';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { ApiError, NetworkError, api } from '@/lib/api';
 import { WorkingIndicator } from '@/components/ui/states';
 import { cn } from '@/lib/utils';
+import { buildBreadcrumbs, relatedDestinations } from './navigation';
 
 /**
  * Why a read failed, in one sentence an operator can act on.
@@ -29,20 +30,7 @@ function readFailureReason(error: unknown): string {
  */
 function useBreadcrumbs() {
   const pathname = usePathname();
-  const parts = pathname.split('/').filter(Boolean);
-  if (parts.length === 0) return [{ href: '/overview', label: 'Home' }];
-  const crumbs: Array<{ href: string; label: string }> = [];
-  let acc = '';
-  for (const part of parts) {
-    acc += `/${part}`;
-    crumbs.push({
-      href: acc,
-      label: part.startsWith('inc_')
-        ? part.slice(0, 12).toUpperCase()
-        : part.charAt(0).toUpperCase() + part.slice(1),
-    });
-  }
-  return crumbs;
+  return buildBreadcrumbs(pathname);
 }
 
 /**
@@ -115,8 +103,16 @@ function AutonomyIndicator() {
   );
 }
 
-export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function TopBar({
+  onOpenPalette,
+  onOpenNavigation,
+}: {
+  onOpenPalette: () => void;
+  onOpenNavigation: () => void;
+}) {
+  const pathname = usePathname();
   const crumbs = useBreadcrumbs();
+  const related = relatedDestinations(pathname);
   const {
     data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth,
   } = useQuery({
@@ -127,9 +123,16 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
   });
 
   return (
-    <header className="flex h-[54px] shrink-0 items-center justify-between gap-4
-                       border-b border-hairline bg-canvas px-5">
-      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-body">
+    <header className="flex min-h-[54px] shrink-0 items-center justify-between gap-2 border-b border-hairline bg-canvas px-3 sm:px-5">
+      <button
+        type="button"
+        onClick={onOpenNavigation}
+        aria-label="Open navigation"
+        className="shrink-0 rounded-btn p-2 text-ink-secondary hover:bg-surface-2 lg:hidden"
+      >
+        <Menu className="h-4 w-4" aria-hidden />
+      </button>
+      <nav aria-label="Breadcrumb" className="flex min-w-0 flex-1 items-center gap-1 text-body">
         {crumbs.map((crumb, i) => (
           <span key={crumb.href} className="flex min-w-0 items-center gap-1">
             {i > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-ink-tertiary" aria-hidden />}
@@ -148,11 +151,20 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
         ))}
       </nav>
 
+      <nav aria-label="Related pages" className="hidden shrink-0 items-center gap-2 xl:flex">
+        <span className="text-meta text-ink-tertiary">Related</span>
+        {related.map((destination) => (
+          <Link key={destination.href} href={destination.href} className="text-meta text-ink-secondary hover:text-ink-primary">
+            {destination.label}
+          </Link>
+        ))}
+      </nav>
+
       <div className="flex shrink-0 items-center gap-2.5">
         <button
           type="button"
           onClick={onOpenPalette}
-          className="inline-flex items-center gap-2 rounded-btn border border-line bg-surface-2
+          className="hidden items-center gap-2 rounded-btn border border-line bg-surface-2 sm:inline-flex
                      px-2.5 py-1 text-meta text-ink-tertiary
                      transition-colors duration-hover hover:bg-surface-3 hover:text-ink-secondary"
           aria-label="Open command palette"
@@ -162,6 +174,7 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
           <kbd className="rounded border border-line px-1 font-mono text-[10px]">Ctrl K</kbd>
         </button>
 
+        <div className="hidden items-center gap-2.5 md:flex">
         {healthLoading ? (
           <WorkingIndicator label="Reading integration health" />
         ) : health ? (
@@ -230,6 +243,7 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
         )}
 
         <AutonomyIndicator />
+        </div>
         <AccountMenu />
       </div>
     </header>
@@ -249,7 +263,7 @@ function AccountMenu() {
   if (!identity) return null;
 
   const label = identity.displayName || identity.email || identity.uid;
-  const fullLabel = `${label}${identity.mode === 'local' ? ' (local development session)' : ''}`;
+  const fullLabel = label;
   return (
     <div className="flex items-center gap-2 border-l border-hairline pl-2.5">
       {/* The visible label is truncated and its tooltip is mouse-only, so the

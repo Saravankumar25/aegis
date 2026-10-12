@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, PrincipalDep
+from aegis.api.deps import ContainerDep, RequireViewer, environment_allowed
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -20,11 +20,15 @@ router = APIRouter(prefix="/tasks", tags=["operations"])
 
 @router.get("", summary="Work waiting on this operator")
 async def my_tasks(
-    principal: PrincipalDep,
+    principal: RequireViewer,
     container: ContainerDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict[str, Any]:
+    allowed = None if "*" in principal.environments else sorted(principal.environments)
     approvals = await container.approvals.pending(limit=limit)
+    approvals = [
+        row for row in approvals if environment_allowed(principal, str(row["environment"]))
+    ]
 
     escalated = await container.db.fetch(
         """
@@ -34,10 +38,12 @@ async def my_tasks(
           JOIN incidents i ON i.id = a.incident_id
          WHERE a.state IN ('FAILED', 'ROLLED_BACK')
            AND a.completed_at > now() - interval '24 hours'
+           AND ($2::text[] IS NULL OR i.environment = ANY($2))
          ORDER BY a.completed_at DESC
          LIMIT $1
         """,
         limit,
+        allowed,
     )
 
     blocked = await container.db.fetch(
@@ -45,10 +51,12 @@ async def my_tasks(
         SELECT id, title, severity, state, environment, updated_at
           FROM incidents
          WHERE state IN ('BLOCKED', 'ESCALATED')
+           AND ($2::text[] IS NULL OR environment = ANY($2))
          ORDER BY updated_at DESC
          LIMIT $1
         """,
         limit,
+        allowed,
     )
 
     tasks: list[dict[str, Any]] = []

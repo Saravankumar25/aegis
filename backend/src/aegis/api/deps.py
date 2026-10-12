@@ -116,32 +116,23 @@ def _bearer(authorization: str | None) -> str | None:
 
 async def current_principal(
     request: Request,
-    settings: SettingsDep,
+    _settings: SettingsDep,
     authorization: Annotated[str | None, Header()] = None,
 ) -> Principal:
     """Authenticate the caller.
 
-    The dev bypass exists so the stack is usable before Firebase is wired up. It
-    is refused outright in production by ``Settings._production_hardening``, and
-    additionally guarded here so a misconfiguration cannot open a hole.
+    Local development uses Firebase Auth Emulator tokens. A shared bearer-token
+    bypass is intentionally not accepted: public UI and backend now share the
+    same cryptographically verified identity contract in every environment.
     """
     token = _bearer(authorization)
     if token is None:
         raise AuthenticationError("missing bearer token")
 
-    if settings.auth_dev_mode and not settings.is_production:
-        expected = settings.auth_dev_bypass_token.get_secret_value()
-        if expected and token == expected:
-            log.debug("dev-mode principal accepted")
-            return Principal(
-                uid="dev-user",
-                email="dev@localhost",
-                roles=frozenset({Role.ADMIN.value}),
-                display_name="Local Developer",
-            )
-
     verifier: FirebaseVerifier = request.app.state.verifier
     principal = verifier.verify(token)
+    if not _settings.aegis_tenant_id or principal.tenant_id != _settings.aegis_tenant_id:
+        raise AuthorizationError("tenant access is required")
     request.state.principal = principal
     return principal
 
@@ -214,3 +205,18 @@ RequireViewer = Annotated[Principal, Depends(require_role(Role.VIEWER))]
 RequireResponder = Annotated[Principal, Depends(require_role(Role.RESPONDER))]
 RequireApprover = Annotated[Principal, Depends(require_role(Role.APPROVER))]
 RequireAdmin = Annotated[Principal, Depends(require_role(Role.ADMIN))]
+
+
+def require_environment(principal: Principal, environment: str) -> None:
+    """Fail closed when a token is not scoped to the requested environment."""
+    if "*" in principal.environments or environment in principal.environments:
+        return
+    raise AuthorizationError(
+        "environment access is required",
+        context={"environment": environment},
+    )
+
+
+def environment_allowed(principal: Principal, environment: str) -> bool:
+    """Return whether an already-authenticated principal may see an environment."""
+    return "*" in principal.environments or environment in principal.environments

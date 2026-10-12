@@ -143,6 +143,14 @@ class SourceUnavailable(ExternalServiceError):
     http_status = 503
 
 
+class DatabaseResuming(ExternalServiceError):
+    """The serverless database is waking and no authoritative read is possible yet."""
+
+    code = "DATABASE_RESUMING"
+    http_status = 503
+    retryable = True
+
+
 class SourceNotConfigured(SourceUnavailable):
     """The evidence source is not deployed here, so nothing was attempted.
 
