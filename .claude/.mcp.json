@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "graphify-mcp",
+      "args": ["--graph-path", "graphify-out/graph.json"],
+      "disabled": false
+    }
+  }
+}
