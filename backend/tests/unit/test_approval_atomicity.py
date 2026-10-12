@@ -10,11 +10,13 @@ import pytest
 
 from aegis.api.routers.approvals import DecisionRequest, decide
 from aegis.api.security import Principal
+from aegis.core.errors import DomainError
 
 
 class FailingEnqueueConnection:
-    def __init__(self) -> None:
+    def __init__(self, *, duplicate: bool = False) -> None:
         self.pending: list[str] = []
+        self.duplicate = duplicate
 
     async def fetchrow(self, query: str, *args):
         if query.lstrip().startswith("UPDATE approvals"):
@@ -26,6 +28,8 @@ class FailingEnqueueConnection:
                 "decision": args[1],
             }
         if query.lstrip().startswith("INSERT INTO workflow_jobs"):
+            if self.duplicate:
+                return None
             raise RuntimeError("simulated enqueue failure")
         raise AssertionError(f"unexpected query: {query}")
 
@@ -45,7 +49,7 @@ class FailingEnqueueDatabase:
     async def transaction(self):
         try:
             yield self.conn
-        except RuntimeError:
+        except Exception:
             self.conn.pending.clear()
             self.rolled_back = True
             raise
@@ -76,6 +80,41 @@ async def test_enqueue_failure_rolls_back_decision_and_audit() -> None:
     )
 
     with pytest.raises(RuntimeError, match="simulated enqueue failure"):
+        await decide(
+            "approval-1",
+            DecisionRequest(decision="approved", note=""),
+            principal,
+            container,
+        )
+
+    assert db.rolled_back
+    assert db.committed == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_job_rolls_back_new_approval_decision() -> None:
+    db = FailingEnqueueDatabase()
+    db.conn.duplicate = True
+    approval = SimpleNamespace(id="approval-1", incident_id="incident-1")
+    approvals = SimpleNamespace(
+        get=lambda _: _approval(approval),
+        current_time=lambda: datetime.now(UTC),
+    )
+    container = SimpleNamespace(
+        approvals=approvals,
+        incidents=SimpleNamespace(get=lambda _: _incident()),
+        db=db,
+        settings=SimpleNamespace(workflow_dispatch_backend="postgres"),
+    )
+    principal = Principal(
+        uid="approver-1",
+        email="approver@example.test",
+        roles=frozenset({"approver"}),
+        tenant_id="tenant-1",
+        environments=frozenset({"staging"}),
+    )
+
+    with pytest.raises(DomainError, match="could not be queued"):
         await decide(
             "approval-1",
             DecisionRequest(decision="approved", note=""),

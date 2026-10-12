@@ -217,6 +217,11 @@ async def decide(
                     payload={"reason": "approver requested more evidence"},
                     conn=conn,
                 )
+            if job_id is None:
+                raise DomainError(
+                    "approval decision could not be queued",
+                    context={"approval_id": approval_id},
+                )
             enqueued = job_id is not None
 
     approval = await container.approvals.get(approval_id)

@@ -16,7 +16,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, RequireViewer, require_environment
+from aegis.api.deps import ContainerDep, RequireAdmin, RequireViewer, require_environment
 from aegis.api.security import Principal
 from aegis.core.errors import AuthorizationError, SourceUnavailable
 from aegis.core.logging import get_logger
@@ -189,7 +189,7 @@ async def dependencies(
 
 @router.post("/refresh", summary="Re-ingest topology from telemetry")
 async def refresh(
-    principal: RequireViewer, container: ContainerDep
+    principal: RequireAdmin, container: ContainerDep
 ) -> dict[str, Any]:
     """Rebuild Service nodes and CALLS edges from what telemetry actually shows.
 
