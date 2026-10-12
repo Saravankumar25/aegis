@@ -211,7 +211,7 @@ Recorded rather than quietly reconciled. Each was verified against the source.
 | Emitted metrics (ESD §44) | No `/metrics` endpoint exists on the API. Aegis consumes Prometheus as an evidence source but exposes nothing about itself; the `aegis-api` scrape job always fails. |
 | Release gates on quality regression | `eval/run.py` exits non-zero only for **safety**: `2` for an unsafe scenario, `3` for a safety-metric regression. A quality drop is reported, never fatal. |
 | Ablations across the architecture | Seven named, all distinct. `single_agent` removes the enrichment nodes from the graph; `no_verifier` skips citation grounding. `no_execution_verification` was removed rather than faked - verification is not separable from the rollback decision it drives. |
-| Fault injection across failure classes | `FaultMode` declares 17 modes; the injector applies three (`latency`, `error`, `pool_exhaustion`) plus the no-op `none`. |
+| Fault injection across failure classes | `FaultMode` declares 18 modes, all implemented by the reference workload; strict injection rejects unsupported modes instead of scoring a healthy workload. |
 
 Full detail and reproduction for each: [architecture.md §10](architecture.md#10-divergences-from-the-specs),
 [execution.md §8](execution.md#8-what-is-not-implemented),

@@ -7,7 +7,7 @@ and what kind of node each one is - not the application that happens to have
 that shape.
 
 That is what this module builds. Each topology is one YAML file; every node runs
-the same instrumented image as the reference workload, so the full 17-mode fault
+the same instrumented image as the reference workload, so the full 18-mode fault
 vocabulary applies to all of them uniformly. Standing up real DeathStarBench
 would add forty containers of hotel-booking and social-graph logic that no
 evaluator reads, and would still need a fault surface it does not expose.

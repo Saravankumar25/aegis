@@ -9,7 +9,7 @@
 # expose.
 #
 # Every node runs the same instrumented image as the reference workload, so the
-# full 17-mode fault vocabulary applies here exactly as it does there.
+# full 18-mode fault vocabulary applies here exactly as it does there.
 #
 # Edges are derived from the corpus: a scenario's `causal_dependency` runs
 # root-cause first, so the call edge is that chain reversed.

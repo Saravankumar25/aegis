@@ -129,10 +129,10 @@ jobs:
           modes=$(curl -fsS http://localhost:18080/admin/modes \
             | python -c 'import json,sys; print(len(json.load(sys.stdin)["modes"]))')
           echo "workload implements $modes fault modes"
-          # 17 is the size of FaultMode in backend/src/aegis/evaluation/schema.py.
+          # 18 is the size of FaultMode in backend/src/aegis/evaluation/schema.py.
           # Fewer means some scenario cannot be injected — the condition that
           # left 60% of the corpus unrunnable before.
-          test "$modes" -eq 17
+          test "$modes" -eq 18
 
           # An unknown mode must be refused. Accepting it and injecting nothing
           # is how a healthy system gets scored against a fault nobody applied.

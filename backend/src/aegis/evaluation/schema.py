@@ -105,6 +105,7 @@ class FaultMode(StrEnum):
     LATENCY = "latency"
     ERROR = "error"
     POOL_EXHAUSTION = "pool_exhaustion"
+    POOL_LEAK = "pool_leak"
     PROCESS_KILL = "process_kill"
     CPU_BURN = "cpu_burn"
     MEMORY_LEAK = "memory_leak"

@@ -310,11 +310,10 @@ no `no_execution_verification` arm, because verification is inseparable from the
 rollback decision it drives. Earlier drafts described three arms that ran the
 full architecture and are merely labelled otherwise.
 
-**Fault injection covers three modes of seventeen.** `FaultMode` declares 17
-values; the injector can apply `latency`, `error`, `pool_exhaustion` (plus the
-no-op `none`) — exactly what the reference workload implements. Roughly 27 of 52
-scenarios name a mode it cannot apply, and because `strict` defaults to `False`
-those scenarios inject nothing and are then scored as if the fault were present.
+**Fault injection covers all 18 declared modes.** `FaultMode` and the reference
+workload share the same vocabulary, including gradual pool leaks. The injector
+defaults to strict mode and treats an unsupported mode as a harness failure, so
+a healthy workload is never scored as though an unavailable fault had run.
 Use a single injectable category for a number that means something.
 
 **Autonomous action in production is currently impossible.** Policy rule 12 tests

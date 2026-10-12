@@ -68,7 +68,7 @@ Frontend: Next.js 15 / React 19 console, SSE war-room
 | Frontend console (19 routes + war-room) | Mostly complete | see section 7 |
 | Communication Center, Incident Calls, MCP Tool Explorer, Agent Eval page, provider-failure UX | **Missing** | UI spec §41, 42, 56, 52, 82; no backend routes either |
 | Ask Aegis, incident memory page, environments, mobile incident view | **Partial** | spec §78-79, 49, 57, 68-69 |
-| Fault injection (17 modes), benchmark | Complete | CLAUDE.md, `eval/` |
+| Fault injection (18 modes), benchmark | Complete | CLAUDE.md, `eval/` |
 | Kind / Kubernetes workload | Empty placeholder | `infra/kind/` |
 
 No feature found that is "mocked" in the production path; the workload topologies are intentionally synthetic shapes (documented).
