@@ -153,8 +153,6 @@ def create_app() -> FastAPI:
             asyncpg.ConnectionDoesNotExistError,
             asyncpg.PostgresConnectionError,
             asyncpg.TooManyConnectionsError,
-            ConnectionError,
-            TimeoutError,
         ) as cause:
             database_unavailable = DatabaseResuming(
                 "database is resuming; retry after the advertised delay",

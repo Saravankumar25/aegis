@@ -11,12 +11,14 @@ the opposite of what happened.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, RequireViewer
-from aegis.core.errors import SourceUnavailable
+from aegis.api.deps import ContainerDep, RequireViewer, require_environment
+from aegis.api.security import Principal
+from aegis.core.errors import AuthorizationError, SourceUnavailable
 from aegis.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -49,21 +51,24 @@ async def services(_: RequireViewer, container: ContainerDep) -> dict[str, Any]:
         rows = await client.run(_LIST_SERVICES, {})
     except SourceUnavailable as exc:
         return {"available": False, "reason": str(exc), "items": []}
+    principal = _
     items = [
         {"service_id": str(r["service_id"]), "name": str(r["name"])}
         for r in rows
         if r.get("service_id")
+        and _service_allowed(principal, str(r["service_id"]))
     ]
     return {"available": True, "reason": "", "items": items}
 
 
 @router.get("/neighbourhood", summary="Service graph around one service")
 async def neighbourhood(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     service_id: Annotated[str, Query(min_length=1, max_length=200)],
     depth: Annotated[int, Query(ge=1, le=4)] = 2,
 ) -> dict[str, Any]:
+    _require_service(principal, service_id)
     if container.topology is None:
         return _unavailable("no graph client is configured")
     try:
@@ -73,8 +78,12 @@ async def neighbourhood(
     return {
         "available": True,
         "reason": "",
-        "nodes": result.get("nodes", []),
-        "edges": result.get("edges", []),
+        "nodes": [n for n in result.get("nodes", []) if _node_allowed(principal, n)],
+        "edges": [
+            e for e in result.get("edges", [])
+            if _id_allowed(principal, e.get("source"))
+            and _id_allowed(principal, e.get("target"))
+        ],
         "root": service_id,
         "depth": depth,
     }
@@ -82,36 +91,47 @@ async def neighbourhood(
 
 @router.get("/blast-radius", summary="What breaks if this service does")
 async def blast_radius(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     service_id: Annotated[str, Query(min_length=1, max_length=200)],
     max_depth: Annotated[int, Query(ge=1, le=6)] = 3,
 ) -> dict[str, Any]:
+    _require_service(principal, service_id)
     if container.topology is None:
         return {"available": False, "reason": "no graph client is configured"}
     try:
         radius = await container.topology.blast_radius(service_id, max_depth=max_depth)
     except SourceUnavailable as exc:
         return {"available": False, "reason": str(exc)}
+    directly_affected = [
+        s for s in radius.directly_affected if _id_allowed(principal, s)
+    ]
+    downstream = [s for s in radius.downstream if _id_allowed(principal, s)]
     return {
         "available": True,
         "service_id": service_id,
-        "directly_affected": radius.directly_affected,
-        "downstream": radius.downstream,
-        "customer_facing": radius.customer_facing,
-        "size": radius.size,
-        "estimated_request_share": radius.estimated_request_share,
+        "directly_affected": directly_affected,
+        "downstream": downstream,
+        "customer_facing": (
+            radius.customer_facing if "*" in principal.environments else None
+        ),
+        "size": len(directly_affected) + len(downstream),
+        "estimated_request_share": (
+            radius.estimated_request_share if "*" in principal.environments else None
+        ),
     }
 
 
 @router.get("/causal-paths", summary="Paths between two services")
 async def causal_paths(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     from_service: Annotated[str, Query(min_length=1, max_length=200)],
     to_service: Annotated[str, Query(min_length=1, max_length=200)],
     max_depth: Annotated[int, Query(ge=1, le=6)] = 5,
 ) -> dict[str, Any]:
+    _require_service(principal, from_service)
+    _require_service(principal, to_service)
     if container.topology is None:
         return {"available": False, "reason": "no graph client is configured", "paths": []}
     try:
@@ -120,16 +140,21 @@ async def causal_paths(
         )
     except SourceUnavailable as exc:
         return {"available": False, "reason": str(exc), "paths": []}
+    paths = [
+        path for path in paths
+        if all(_id_allowed(principal, service_id) for service_id in path.nodes)
+    ]
     return {"available": True, "paths": paths, "count": len(paths)}
 
 
 @router.get("/dependencies", summary="Upstream dependencies of a service")
 async def dependencies(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     service_id: Annotated[str, Query(min_length=1, max_length=200)],
     max_depth: Annotated[int, Query(ge=1, le=6)] = 3,
 ) -> dict[str, Any]:
+    _require_service(principal, service_id)
     if container.topology is None:
         return {"available": False, "reason": "no graph client is configured", "items": []}
     try:
@@ -139,6 +164,21 @@ async def dependencies(
         shared = await container.topology.services_sharing_dependency(service_id)
     except SourceUnavailable as exc:
         return {"available": False, "reason": str(exc), "items": []}
+    upstream = [
+        node for node in upstream
+        if "*" in principal.environments
+        or node.properties.get("environment") in principal.environments
+        or _id_allowed(principal, node.node_id)
+    ]
+    if "*" not in principal.environments:
+        shared = [
+            replace(
+                item,
+                service_ids=tuple(s for s in item.service_ids if _id_allowed(principal, s)),
+            )
+            for item in shared
+        ]
+        shared = [item for item in shared if item.service_ids]
     return {
         "available": True,
         "service_id": service_id,
@@ -149,7 +189,7 @@ async def dependencies(
 
 @router.post("/refresh", summary="Re-ingest topology from telemetry")
 async def refresh(
-    _: RequireViewer, container: ContainerDep
+    principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
     """Rebuild Service nodes and CALLS edges from what telemetry actually shows.
 
@@ -158,6 +198,7 @@ async def refresh(
     """
     if container.graph_ingest is None:
         return {"available": False, "reason": "no graph client is configured"}
+    require_environment(principal, container.settings.aegis_environment_name)
 
     result: dict[str, Any] = {"available": True, "services": None, "edges": None}
     try:
@@ -188,3 +229,39 @@ async def refresh(
 
     log.info("topology refresh requested", **{k: v for k, v in result.items() if v is not None})
     return result
+
+
+def _service_environment(service_id: str) -> str:
+    parts = service_id.split(":")
+    if len(parts) != 3 or not all(parts):
+        raise AuthorizationError("service access requires a canonical environment-scoped id")
+    return parts[0]
+
+
+def _require_service(principal: Principal, service_id: str) -> None:
+    require_environment(principal, _service_environment(service_id))
+
+
+def _id_allowed(principal: Principal, service_id: Any) -> bool:
+    if not isinstance(service_id, str):
+        return False
+    try:
+        return (
+            "*" in principal.environments
+            or _service_environment(service_id) in principal.environments
+        )
+    except AuthorizationError:
+        return False
+
+
+def _service_allowed(principal: Principal, service_id: str) -> bool:
+    return _id_allowed(principal, service_id)
+
+
+def _node_allowed(principal: Principal, node: dict[str, Any]) -> bool:
+    environment = node.get("environment")
+    return (
+        "*" in principal.environments
+        or isinstance(environment, str) and environment in principal.environments
+        or _id_allowed(principal, node.get("id"))
+    )

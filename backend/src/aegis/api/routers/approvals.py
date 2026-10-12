@@ -26,8 +26,9 @@ from aegis.api.deps import (
     environment_allowed,
     require_environment,
 )
-from aegis.core.errors import NotFoundError
+from aegis.core.errors import DomainError, NotFoundError
 from aegis.core.logging import get_logger
+from aegis.persistence.audit import AuditEvent
 from aegis.persistence.jobs import JobQueue
 from aegis.policy.tiers import profile_for
 
@@ -146,45 +147,81 @@ async def decide(
     incident = await container.incidents.get(existing.incident_id)
     require_environment(principal, incident.environment)
 
-    approval = await container.approvals.decide(
-        approval_id,
-        decision=body.decision,  # type: ignore[arg-type]
-        decided_by=principal.uid,
-        note=body.note,
-    )
+    async with container.db.transaction() as conn:
+        now = container.approvals.current_time()
+        row = await conn.fetchrow(
+            """
+            UPDATE approvals
+               SET decision=$2, decided_by=$3, decided_at=$4, note=$5
+             WHERE id=$1 AND decision IS NULL AND expires_at > $4
+            RETURNING id, action_id, incident_id, decision
+            """,
+            approval_id, body.decision, principal.uid, now, body.note,
+        )
+        changed = row is not None
+        if row is None:
+            row = await conn.fetchrow(
+                "SELECT id, action_id, incident_id, decision, decided_by "
+                "FROM approvals WHERE id=$1 FOR UPDATE",
+                approval_id,
+            )
+            if row is None:
+                raise NotFoundError("approval not found", context={"approval_id": approval_id})
+            if row["decision"] != body.decision:
+                raise DomainError(
+                    "approval was already decided differently or has expired",
+                    context={"approval_id": approval_id, "decision": row["decision"]},
+                )
 
-    enqueued = False
-    if approval.decision == "approved":
-        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
-        await queue.enqueue(
-            kind="execute_action",
-            incident_id=approval.incident_id,
-            payload={"action_id": approval.action_id, "approval_id": approval.id},
-        )
-        enqueued = True
-    elif approval.decision == "rejected":
-        # A horizon run parked in AWAITING_APPROVAL must learn it was refused,
-        # or it waits forever. The worker treats this as a no-op for incidents
-        # the step loop is not driving.
-        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
-        await queue.enqueue(
-            kind="horizon_resume",
-            incident_id=approval.incident_id,
-            payload={
-                "action_id": approval.action_id,
-                "approval_id": approval.id,
-                "approved": False,
-            },
-        )
-        enqueued = True
-    elif approval.decision == "more_evidence":
-        queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
-        await queue.enqueue(
-            kind="investigate",
-            incident_id=approval.incident_id,
-            payload={"reason": "approver requested more evidence"},
-        )
-        enqueued = True
+        if changed:
+            event = {
+                "approved": AuditEvent.APPROVAL_GRANTED,
+                "rejected": AuditEvent.APPROVAL_REJECTED,
+                "more_evidence": AuditEvent.APPROVAL_MORE_EVIDENCE,
+            }[body.decision]
+            await conn.execute(
+                """
+                INSERT INTO audit_log (actor, actor_type, event_type, incident_id,
+                                       resource_type, resource_id, detail)
+                VALUES ($1, 'human', $2, $3, 'action', $4, $5)
+                """,
+                principal.uid, event, row["incident_id"], row["action_id"],
+                {"approval_id": approval_id, "note": body.note[:1000]},
+            )
+
+        enqueued = False
+        if changed:
+            queue = JobQueue(container.db, container.settings.workflow_dispatch_backend)
+            if body.decision == "approved":
+                job_id = await queue.enqueue(
+                    kind="execute_action",
+                    incident_id=str(row["incident_id"]),
+                    payload={"action_id": str(row["action_id"]), "approval_id": approval_id},
+                    conn=conn,
+                )
+            elif body.decision == "rejected":
+                job_id = await queue.enqueue(
+                    kind="horizon_resume",
+                    incident_id=str(row["incident_id"]),
+                    payload={
+                        "action_id": str(row["action_id"]),
+                        "approval_id": approval_id,
+                        "approved": False,
+                    },
+                    conn=conn,
+                )
+            else:
+                job_id = await queue.enqueue(
+                    kind="investigate",
+                    incident_id=str(row["incident_id"]),
+                    payload={"reason": "approver requested more evidence"},
+                    conn=conn,
+                )
+            enqueued = job_id is not None
+
+    approval = await container.approvals.get(approval_id)
+    if approval is None:
+        raise NotFoundError("approval not found", context={"approval_id": approval_id})
 
     log.info(
         "approval decided",

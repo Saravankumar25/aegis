@@ -13,7 +13,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
-from aegis.api.deps import ContainerDep, RequireViewer
+from aegis.api.deps import ContainerDep, RequireViewer, require_environment
+from aegis.api.security import Principal
+from aegis.container import Container
 from aegis.core.errors import ExternalServiceError, SourceUnavailable
 from aegis.core.logging import get_logger
 
@@ -33,7 +35,7 @@ def _unavailable(reason: str) -> dict[str, Any]:
 
 @router.get("/services", summary="Services in the observed environment")
 async def list_services(
-    _: RequireViewer, container: ContainerDep
+    principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
     if container.runtime is None or not container.runtime.available:
         reason = (
@@ -64,14 +66,16 @@ async def list_services(
             "owner_team": s.owner_team,
         }
         for s in states
+        if "*" in principal.environments or s.ref.environment in principal.environments
     ]
     return {"available": True, "reason": "", "items": items, "count": len(items)}
 
 
 @router.get("/services/{service_id}/instances", summary="Instances of one service")
 async def list_instances(
-    service_id: str, _: RequireViewer, container: ContainerDep
+    service_id: str, principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
+    _require_runtime_environment(principal, container, service_id)
     if container.runtime is None or not container.runtime.available:
         return _unavailable("no runtime adapter is configured")
     try:
@@ -97,7 +101,7 @@ async def list_instances(
 
 @router.get("/services/{service_id}/metrics", summary="Golden signals for one service")
 async def service_metrics(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     service_id: str,
     window_s: Annotated[int, Query(ge=60, le=86400)] = 3600,
@@ -107,6 +111,7 @@ async def service_metrics(
     Each signal is reported independently. One unavailable metric does not blank
     the other two, and an unavailable metric is never rendered as zero.
     """
+    _require_runtime_environment(principal, container, service_id)
     name = service_id.split(":")[-1]
     out: dict[str, Any] = {"service_id": service_id, "window_s": window_s, "signals": {}}
 
@@ -134,9 +139,9 @@ async def service_metrics(
 
 @router.get("/health", summary="Environment health roll-up")
 async def environment_health(
-    _: RequireViewer, container: ContainerDep
+    principal: RequireViewer, container: ContainerDep
 ) -> dict[str, Any]:
-    services = await list_services(_, container)
+    services = await list_services(principal, container)
     if not services["available"]:
         return {"available": False, "reason": services["reason"]}
     items = services["items"]
@@ -149,3 +154,19 @@ async def environment_health(
         "by_health": by_health,
         "degraded": [i["service_id"] for i in items if i["degraded"]],
     }
+
+
+def _require_runtime_environment(
+    principal: Principal, container: Container, service_id: str
+) -> None:
+    parts = service_id.split(":")
+    if len(parts) != 3 or not all(parts):
+        from aegis.core.errors import ValidationError
+
+        raise ValidationError("service_id must be '{environment}:{workload}:{service}'")
+    configured_environment = container.settings.aegis_environment_name
+    require_environment(principal, configured_environment)
+    if parts[0] != configured_environment:
+        from aegis.core.errors import NotFoundError
+
+        raise NotFoundError("service not present in the configured environment")

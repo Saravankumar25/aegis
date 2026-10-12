@@ -21,7 +21,7 @@ router = APIRouter(prefix="/reliability", tags=["reliability"])
 
 @router.get("/summary", summary="Operational summary over a window")
 async def summary(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     days: Annotated[int, Query(ge=1, le=90)] = 7,
 ) -> dict[str, Any]:
@@ -34,9 +34,10 @@ async def summary(
                avg(EXTRACT(EPOCH FROM (resolved_at - created_at)))
                    FILTER (WHERE resolved_at IS NOT NULL)            AS mttr_seconds
           FROM incidents
-         WHERE created_at > now() - make_interval(days => $1)
+         WHERE ($1::text[] @> ARRAY['*'] OR environment = ANY($1::text[]))
+           AND created_at > now() - make_interval(days => $2)
         """,
-        days,
+        list(principal.environments), days,
     )
     actions = await db.fetchrow(
         """
@@ -46,19 +47,23 @@ async def summary(
                count(*) FILTER (WHERE state = 'FAILED')           AS failed,
                count(*) FILTER (WHERE state = 'BLOCKED')          AS blocked,
                count(*) FILTER (WHERE state = 'HUMAN_REQUIRED')   AS awaiting_human
-          FROM remediation_actions
-         WHERE created_at > now() - make_interval(days => $1)
+          FROM remediation_actions a
+          JOIN incidents i ON i.id = a.incident_id
+         WHERE ($1::text[] @> ARRAY['*'] OR i.environment = ANY($1::text[]))
+           AND a.created_at > now() - make_interval(days => $2)
         """,
-        days,
+        list(principal.environments), days,
     )
     verdicts = await db.fetch(
         """
         SELECT verdict, count(*) AS n
-          FROM verification_runs
-         WHERE completed_at > now() - make_interval(days => $1)
+          FROM verification_runs v
+          JOIN incidents i ON i.id = v.incident_id
+         WHERE ($1::text[] @> ARRAY['*'] OR i.environment = ANY($1::text[]))
+           AND v.completed_at > now() - make_interval(days => $2)
          GROUP BY verdict
         """,
-        days,
+        list(principal.environments), days,
     )
     if incidents is None or actions is None:
         # An aggregate over an empty table still returns a row, so a missing
@@ -107,7 +112,7 @@ def _iso(value: Any) -> str | None:
 
 @router.get("/recurring", summary="Failures that keep coming back")
 async def recurring(
-    _: RequireViewer,
+    principal: RequireViewer,
     container: ContainerDep,
     days: Annotated[int, Query(ge=7, le=365)] = 90,
     min_occurrences: Annotated[int, Query(ge=2, le=50)] = 2,
@@ -122,6 +127,12 @@ async def recurring(
         return {
             "available": False,
             "reason": "incident memory is not configured",
+            "items": [],
+        }
+    if "*" not in principal.environments:
+        return {
+            "available": False,
+            "reason": "environment-scoped recurrence is not supported by the memory store",
             "items": [],
         }
     patterns = await container.memory_recall.recurring_patterns(
@@ -148,7 +159,7 @@ async def recurring(
 
 @router.get("/services", summary="Per-service incident load")
 async def by_service(
-    _: RequireViewer,
+    principal: RequireViewer,
     db: DbDep,
     days: Annotated[int, Query(ge=1, le=365)] = 30,
 ) -> dict[str, Any]:
@@ -159,12 +170,13 @@ async def by_service(
                count(*) FILTER (WHERE severity = 'P1')     AS p1,
                max(created_at)                             AS last_incident
           FROM incidents, unnest(affected_services) AS service
-         WHERE created_at > now() - make_interval(days => $1)
+         WHERE ($1::text[] @> ARRAY['*'] OR environment = ANY($1::text[]))
+           AND created_at > now() - make_interval(days => $2)
          GROUP BY service
          ORDER BY incidents DESC
          LIMIT 100
         """,
-        days,
+        list(principal.environments), days,
     )
     return {
         "window_days": days,

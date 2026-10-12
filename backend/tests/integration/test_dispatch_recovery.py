@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from aegis.persistence.db import Database
@@ -27,6 +29,37 @@ async def test_committed_job_keeps_one_dispatch_request(db: Database, clean_inci
     )
     assert counts is not None
     assert counts["jobs"] == 1 and counts["dispatches"] == 1
+
+
+async def test_job_and_dispatch_outbox_roll_back_with_transaction(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    incident_id = f"inc_rollback_{uuid4().hex}"
+    with pytest.raises(RuntimeError, match="force rollback"):
+        async with db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO incidents (id, title, severity, state, environment) "
+                "VALUES ($1, 'rollback test', 'P3', 'OPEN', 'test')",
+                incident_id,
+            )
+            job_id = await queue.enqueue(
+                incident_id=incident_id, kind="rollback_test", conn=conn
+            )
+            assert job_id is not None
+            assert await conn.fetchval(
+                "SELECT count(*) FROM workflow_dispatch_outbox WHERE job_id=$1", job_id
+            ) == 1
+            raise RuntimeError("force rollback")
+
+    assert await db.fetchval("SELECT count(*) FROM incidents WHERE id=$1", incident_id) == 0
+    assert await db.fetchval(
+        "SELECT count(*) FROM workflow_jobs WHERE incident_id=$1 AND kind='rollback_test'",
+        incident_id,
+    ) == 0
+    assert await db.fetchval(
+        "SELECT count(*) FROM workflow_dispatch_outbox WHERE job_id=$1", job_id,
+    ) == 0
 
 
 async def test_stale_dispatch_and_job_are_recoverable_without_losing_checkpoint(

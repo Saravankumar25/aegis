@@ -481,10 +481,10 @@ class HorizonOrchestrator:
             max_tokens=self._s.agent_max_tokens,
             clock=self._d.clock,
         )
-        elapsed = 0.0
-        if state.started_at is not None:
-            elapsed = max(0.0, (self._d.clock.now() - state.started_at).total_seconds())
-        budget.restore_usage(state.budget_usage, elapsed_s=elapsed)
+        # Horizon can pause for minutes or days awaiting human approval. The
+        # wall budget is active agent time, so only checkpointed usage counts;
+        # incident calendar age is not an agent invocation.
+        budget.restore_usage(state.budget_usage)
         return budget
 
     async def _loop(self, state: HorizonState, max_steps: int | None) -> HorizonState:
@@ -497,6 +497,7 @@ class HorizonOrchestrator:
                 break
             if max_steps is not None and taken >= max_steps:
                 break
+            previous_checkpoint = state.model_copy(deep=True)
             try:
                 budget.check(f"horizon:{state.phase.value}")
                 await self._step(state, budget)
@@ -505,6 +506,14 @@ class HorizonOrchestrator:
                 await self._escalate(state, exc.message)
                 await self._checkpoint(state)
                 break
+            except BaseException:
+                # LLM/tool charges happen before their result is validated. If
+                # a provider, parser, or task cancellation fails mid-step, keep
+                # those charges durable before the job can be reclaimed.
+                previous_checkpoint.budget_usage = budget.snapshot()
+                previous_checkpoint.updated_at = self._d.clock.now()
+                await self._checkpoint(previous_checkpoint)
+                raise
             taken += 1
         return state
 

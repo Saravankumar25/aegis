@@ -147,6 +147,7 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_service_account_path: str = ""
     firebase_auth_emulator_host: str = ""
+    firebase_service_account_json_base64: SecretStr = SecretStr("")
     auth_dev_mode: bool = False
     auth_dev_bypass_token: SecretStr = SecretStr("")
     sample_mode_enabled: bool = True

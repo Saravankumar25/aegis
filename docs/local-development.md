@@ -35,6 +35,16 @@ and an explicit `environment:` block. That is deliberate: a hand-curated env lis
 had previously dropped `GITHUB_TOKEN` and `LLM_REQUEST_TIMEOUT_S`, so the whole
 file is loaded and the explicit block only overrides container-specific values.
 
+### Firebase service-account credential
+
+For the Compose stack, store the service-account JSON as a single
+base64-encoded line in `FIREBASE_SERVICE_ACCOUNT_JSON_BASE64` in the root
+`.env`. `make up` materializes a private local file from that value, then Compose
+mounts it as a Docker secret; the private key is not passed in the containers'
+environment. Base64 is encoding, not encryption, so keep `.env` private.
+`FIREBASE_SERVICE_ACCOUNT_PATH` remains available for other deployments that
+provide the credential as a mounted file.
+
 ---
 
 ## 3. Bringing up the stack
@@ -49,6 +59,7 @@ make down    # stop, keep volumes
 Or directly, with the observability and workload profiles:
 
 ```bash
+make prepare-firebase-secret
 docker compose -f infra/docker/docker-compose.yml --env-file .env \
   --project-name aegis-2-0 \
   --profile observability --profile workload up -d --build

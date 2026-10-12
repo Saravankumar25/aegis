@@ -61,6 +61,8 @@ x-common-env: &common-env
   SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
   FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
   FIREBASE_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
+  # Keep the canonical value in the local .env but out of container env metadata.
+  FIREBASE_SERVICE_ACCOUNT_JSON_BASE64: ""
   AUTH_DEV_MODE: ${AUTH_DEV_MODE:-true}
   AUTH_DEV_BYPASS_TOKEN: ${AUTH_DEV_BYPASS_TOKEN:-}
   AUTONOMY_ENABLED: ${AUTONOMY_ENABLED:-false}

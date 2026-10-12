@@ -84,6 +84,10 @@ class ApprovalStore:
         self._ttl = ttl_seconds
         self._clock = clock
 
+    def current_time(self) -> datetime:
+        """Return the injected clock time for transaction-owning API flows."""
+        return self._clock.now()
+
     async def request(
         self,
         *,

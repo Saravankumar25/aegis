@@ -12,7 +12,9 @@ a production rollback. Firebase never grants Aegis authority.
 
 from __future__ import annotations
 
+import base64
 import hmac
+import json
 import os
 from dataclasses import dataclass
 from enum import StrEnum
@@ -84,9 +86,12 @@ class FirebaseVerifier:
         if self._ready:
             return True
         path = self._settings.firebase_service_account_path
+        encoded_account = (
+            self._settings.firebase_service_account_json_base64.get_secret_value()
+        )
         project = self._settings.firebase_project_id
         emulator = self._settings.firebase_auth_emulator_host.strip()
-        if not project or (not path and not emulator):
+        if not project or (not path and not encoded_account and not emulator):
             log.warning("firebase not configured; token verification unavailable")
             return False
         try:
@@ -99,12 +104,27 @@ class FirebaseVerifier:
             if firebase_admin._apps:  # noqa: SLF001 - library exposes no public check
                 self._app = firebase_admin.get_app()
             else:
-                credential = None if emulator else credentials.Certificate(path)
-                self._app = firebase_admin.initialize_app(credential, {"projectId": project})
+                if emulator:
+                    certificate = None
+                elif encoded_account:
+                    account_info = json.loads(
+                        base64.b64decode(encoded_account, validate=True)
+                    )
+                    if not isinstance(account_info, dict):
+                        raise ValueError("service account JSON must be an object")
+                    certificate = credentials.Certificate(account_info)
+                else:
+                    certificate = credentials.Certificate(path)
+                self._app = firebase_admin.initialize_app(
+                    certificate, {"projectId": project}
+                )
             self._ready = True
             log.info("firebase verifier ready", project_id=project)
         except Exception as exc:  # noqa: BLE001 - never fatal at boot
-            log.error("firebase initialisation failed", error=str(exc))
+            log.error(
+                "firebase initialisation failed",
+                error_type=type(exc).__name__,
+            )
             return False
         return self._ready
 

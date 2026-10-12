@@ -20,15 +20,18 @@ DEPENDENCY_VERSION := $(shell $(PY) -c "import json;print(json.load(open('$(KNOW
 # healthy image instead of replacing it with an unlabelled one.
 DEPENDENCY_PREVIOUS_VERSION := 1.0.7
 
-.PHONY: help up down logs ps build test test-web lint typecheck fmt migrate seed graph clean
+.PHONY: help up down logs ps build test test-web lint typecheck fmt migrate seed graph clean prepare-firebase-secret
 .PHONY: workload-images inject-043 reset-043 kill-worker smoke-bedrock demo-scripted seed-horizon
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	 awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-up: workload-images ## start the full local stack
+up: prepare-firebase-secret workload-images ## start the full local stack
 	$(COMPOSE) up -d --build
+
+prepare-firebase-secret:
+	$(PY) scripts/materialize_firebase_secret.py
 
 down:          ## stop the stack, keep volumes
 	$(COMPOSE) down

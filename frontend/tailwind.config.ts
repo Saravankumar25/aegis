@@ -1,5 +1,4 @@
 import type { Config } from 'tailwindcss';
-import tailwindcssAnimate from 'tailwindcss-animate';
 
 // Tokens mirror Aegis_UIUX_Spec section 94. Colours are declared as CSS
 // variables in globals.css so the design system owns semantic rendering and
@@ -69,6 +68,5 @@ const config: Config = {
       },
     },
   },
-  plugins: [tailwindcssAnimate],
 };
 export default config;
